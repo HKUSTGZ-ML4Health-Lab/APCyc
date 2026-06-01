@@ -1,0 +1,150 @@
+cyc_enhance:
+  enable_enlarged_vocab: true
+  vocab_mode: minimal
+  vocab_custom_map: null
+
+load_ckpt:
+  path: ./ckpts/Vocab/LDM/B_pair_A3_balance/version_7/checkpoint/epoch79_step93440.ckpt
+  strict: true
+  skip_mismatch: false
+
+dataset:
+  train:
+    class: CPCoreMMapDataset
+    mmap_dir: CPCore/cpcore_mmap
+    specify_index: CPCore/cpcore_mmap/train_index.txt
+    jsonl_path: cpcore_train.jsonl
+    backbone_only: false
+    return_supervision: true
+    return_sample_id: false
+    use_covariance_matrix: true
+  valid:
+    class: CPCoreMMapDataset
+    mmap_dir: CPCore/cpcore_mmap
+    specify_index: CPCore/cpcore_mmap/valid_index.txt
+    jsonl_path: cpcore_train.jsonl
+    backbone_only: false
+    return_supervision: true
+    return_sample_id: false
+    use_covariance_matrix: true
+
+dataloader:
+  batch_size: 1
+  val_batch_size: 2
+  shuffle: true
+  num_workers: 4
+  wrapper:
+    class: DynamicBatchWrapper
+    complexity: n**2
+    ubound_per_batch: 60000
+    type_balanced: true
+    type_target:
+      ISO: 0.5
+      HT: 0.25
+      SS: 0.25
+    type_total_samples: 0
+
+trainer:
+  class: LDMTrainer
+  criterion: Loss
+  config:
+    max_epoch: 500
+    save_topk: 1
+    val_freq: 10
+    save_dir: ./ckpts/APCyc
+    patience: 10
+    metric_min_better: true
+    optimizer:
+      class: AdamW
+      lr: 1.0e-4
+    scheduler:
+      class: ReduceLROnPlateau
+      factor: 0.6
+      patience: 3
+      mode: min
+      frequency: val_epoch
+      min_lr: 5.0e-6
+
+model:
+  class: APCycLDMPepDesign
+  autoencoder_ckpt: ./ckpts/Vocab/APCyc_AE/version_4/checkpoint/epoch182_step428769.ckpt
+  autoencoder_no_randomness: false
+  hidden_size: 128
+  num_steps: 100
+  n_layers: 4
+  dist_rbf: 16
+  dist_rbf_cutoff: 7.0
+  n_rbf: 16
+  cutoff: 1.0
+  max_gen_position: 64
+  mode: codesign
+  diffusion_opt:
+    std: 10.0
+  pair_opt:
+    pair_dim: 128
+    pair_struct_dim: 64
+    pair_hidden_dim: 256
+    pair_rbf_dim: 32
+    pair_rbf_cutoff: 12.0
+    edge_type_dim: 16
+    pair_anchor_mode: ca
+    pair_anchor_channel_idx: 0
+    enable_pair_injection: true
+    enable_covalent_edges: true
+    covalent_edge_type_id: 3
+    covalent_edge_start_t: null
+    covalent_edge_separate_params: false
+    type_hidden: 128
+    pair_head_hidden: 128
+    min_sep_ss: 3
+    allow_ht_alt_pairs: false
+    ht_alt_min_end: 1
+    mask_mode: teacher
+    relax_residue_constraints: true
+    lambda_cyc_max: 1.0
+    lambda_cyc_schedule: linear
+    lambda_b_max: 1.0
+    lambda_g_max: 1.0
+    struct_proj_dim: 32
+    pair_struct_refine: true
+    pair_struct_refine_hidden: 64
+    pair_cyc_refine: true
+    pair_cyc_refine_hidden: 64
+    enable_pocket_cross_attn: false
+    pocket_cross_attn_dropout: 0.0
+
+
+
+  loss_opt:
+    enable_type_loss: false
+    w_type: 0
+    w_pair: 1.0
+    w_ring: 0
+    sigma_ring: 1.0
+    pair_loss_requires_type_match: false
+    ignore_ht_pair_loss: false
+    mu_c:
+      HT: 3.8
+      SS: 5.5
+      ISO: 5.0
+
+sample_opt:
+  pbar: false
+  energy_func: null
+  energy_lambda: 0.0
+  autoencoder_n_iter: 1
+  t_hard: 10
+  return_pair_trajectory: false
+  use_cg_guidance: false
+  property_ckpt: null
+  guidance_w: null
+  guidance_w_min: null
+  guidance_w_max: null
+  lambda_max: 0.0
+  t_guidance_start: 0
+  t_guidance_end: 0
+
+pdb_root: CPCore/CPCore_pdb
+rec_chain: R
+lig_chain: L
+

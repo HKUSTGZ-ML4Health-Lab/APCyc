@@ -1,0 +1,76 @@
+peptide_chain: L
+receptor_chain: R
+
+md:
+  enabled: true
+  run_mode: run  # write|prepare|run
+  work_dir: md_runs
+  max_samples_per_target: 1
+  target_ids: []
+  types: null
+  pbar: true
+  amber:
+    tleap: /hpc2hdd/home/yzhao642/miniconda3/envs/md_at25/bin/tleap
+    pmemd: /hpc2hdd/home/yzhao642/amber24/bin/pmemd.cuda
+    pmemd_prefix: []
+    cpptraj: /hpc2hdd/home/yzhao642/miniconda3/envs/md_at25/bin/cpptraj
+    mmpbsa: MMPBSA.py
+    ante_mmpbsa: ante-MMPBSA.py
+  system:
+    forcefield: ff14SB
+    water_model: tip3p
+    box_type: oct
+    buffer: 12.0
+    neutralize: true
+    salt_pairs: null
+  minimization:
+    maxcyc: 4000
+    ncyc: 2000
+    cutoff: 9.0
+    restraint_wt: 8.0
+    restraint_mask: "!:WAT & !:Na+ & !:Cl-"
+  heating:
+    t0: 0.0
+    t1: 310.0
+    time_ps: 400.0
+    dt: 0.002
+    cutoff: 9.0
+    restraint_wt: 8.0
+    restraint_mask: "!:WAT & !:Na+ & !:Cl-"
+    gamma_ln: 1.0
+  equilibration:
+    temp: 300.0
+    pressure: 1.0
+    stage_time_ps: 400.0
+    dt: 0.002
+    cutoff: 9.0
+    gamma_ln: 1.0
+    barostat: 2
+    restraint_mask: "!:WAT & !:Na+ & !:Cl-"
+    restraint_schedule: [4.0, 2.0, 1.0, 0.5, 0.1]
+  production:
+    time_ns: 100.0
+    temp: 300.0
+    pressure: 1.0
+    dt: 0.002
+    cutoff: 9.0
+    gamma_ln: 1.0
+    barostat: 2
+    ntpr: 1000
+    ntwx: 1000
+  analysis:
+    rmsd:
+      enabled: true
+      mask: null
+    mmpbsa:
+      enabled: false
+      receptor_mask: null
+      ligand_mask: null
+      auto_ante: false
+      input: |
+        MMPBSA
+        &general
+          endframe=-1,
+        /
+      command: null
+      ante_cmd: null

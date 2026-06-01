@@ -1,0 +1,102 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Native extensions
+*.so
+*.dylib
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.python-version
+
+# Test / coverage / type-checking caches
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editors and OS files
+.DS_Store
+.idea/
+.vscode/
+.run/
+*.swp
+
+# Logs and temporary files
+*.log
+*.out
+*.err
+tmp/
+temp/
+
+# APCyc data, checkpoints, and generated outputs
+checkpoints/*
+!checkpoints/.gitkeep
+ckpts/
+datasets/
+exps/
+output/
+outputs/
+results/
+result/
+eval_output/
+eval_outputs/
+wandb/
+tensorboard/
+*_results*/
+
+# Large generated scientific artifacts
+*.pt
+*.pth
+*.ckpt
+*.pkl
+*.npz
+*.npy
+*.lmdb
+*.lmdb-lock
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+
+# Optional third-party tools downloaded locally
+DockQ/
+TMscore/
+FoldX/
+pyrosetta*/
+amber*/

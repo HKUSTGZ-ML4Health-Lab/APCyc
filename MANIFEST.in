@@ -1,0 +1,12 @@
+include README.md LICENSE env.yaml
+include requirements.txt
+recursive-include requirements *.txt *.sh
+recursive-include configs *.yaml
+recursive-include apcyc/evaluation/configs *.yaml
+recursive-include evaluation/dG *.xml
+recursive-include assets *.png *.pdb *.json
+recursive-include scripts *.py *.sh
+recursive-include bash *.sh
+recursive-include docs *.md
+recursive-include examples *.md
+recursive-exclude * __pycache__ *.py[cod] .DS_Store

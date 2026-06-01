@@ -1,0 +1,16 @@
+# The fully reproducible environment is env.yaml. This file mirrors the main
+# Python-level dependencies for editable installs and lightweight inspection.
+biopython==1.80
+freesasa
+numpy
+openmm==8.0.0
+pdbfixer
+PyYAML
+ray
+rdkit-pypi==2022.3.5
+scipy
+sympy
+tensorboard
+torch==1.13.1
+torch-scatter
+tqdm

@@ -1,0 +1,29 @@
+report:
+  targets: []
+  labels: null
+  label_mode: sample
+  label_map:
+    LNR: Linear (test set)
+    HT: Cyclic (ours)
+    SS: Cyclic (ours)
+  include_status: [ok, cached, written, prepared]
+  time_unit: ns
+  figure:
+    targets: []
+    labels: null
+    figsize: [6, 6]
+    colors: {}
+    traj_alpha: 0.35
+    traj_linewidth: 1.0
+  density:
+    enabled: true
+    targets: []
+    labels: null
+    figsize: [6, 6]
+    colors: {}
+    bins: 60
+    range: null
+    per_sample: true
+    aggregate: true
+    per_sample_alpha: 0.15
+    aggregate_alpha: 0.9

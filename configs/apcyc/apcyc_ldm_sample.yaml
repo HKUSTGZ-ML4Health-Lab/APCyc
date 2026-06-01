@@ -1,0 +1,131 @@
+dataset:
+  train:
+    class: CPCoreDataset
+    pdb_root: CPSea/Model_Generation_and_Evaluation/TestSet/LNR/LNR_complex
+    index_path: CPSea/Model_Generation_and_Evaluation/TestSet/LNR/lnr_index.txt
+    jsonl_path: CPSea/Model_Generation_and_Evaluation/TestSet/LNR/lnr_meta.jsonl
+    rec_chain: R
+    lig_chain: L
+    pocket_json_dir: epitopes_glad_json_dir
+    pocket_json_suffix: _complex_pocket.json
+    require_pocket: true
+    strict_context: true
+    use_covariance_matrix: true
+    backbone_only: false
+    return_supervision: false
+    return_sample_id: true
+  test:
+    class: CPCoreDataset
+    pdb_root: CPSea/Model_Generation_and_Evaluation/TestSet/LNR/LNR_complex
+    index_path: CPSea/Model_Generation_and_Evaluation/TestSet/LNR/lnr_index.txt
+    jsonl_path: CPSea/Model_Generation_and_Evaluation/TestSet/LNR/lnr_meta.jsonl
+    rec_chain: R
+    lig_chain: L
+    pocket_json_dir: epitopes_glad_json_dir
+    pocket_json_suffix: _complex_pocket.json
+    require_pocket: true
+    strict_context: true
+    use_covariance_matrix: true
+    backbone_only: false
+    return_supervision: false
+    return_sample_id: true
+
+dataloader:
+  batch_size: 1
+  val_batch_size: 1
+  shuffle: false
+  num_workers: 4
+
+model:
+  class: APCycLDMPepDesign
+  autoencoder_ckpt: ckpts/APCyc_AE/version_5/checkpoint/epoch94_step222585.ckpt
+  autoencoder_no_randomness: false
+  hidden_size: 128
+  num_steps: 100
+  n_layers: 4
+  dist_rbf: 32
+  dist_rbf_cutoff: 7.0
+  n_rbf: 32
+  cutoff: 1.0
+  max_gen_position: 30
+  mode: codesign
+  diffusion_opt:
+    std: 10.0
+  pair_opt:
+    pair_dim: 128
+    pair_struct_dim: 64
+    pair_hidden_dim: 256
+    pair_rbf_dim: 32
+    pair_rbf_cutoff: 12.0
+    edge_type_dim: 16
+    pair_anchor_mode: ca
+    pair_anchor_channel_idx: 0
+    enable_pair_injection: true
+    enable_covalent_edges: false
+    covalent_edge_type_id: 3
+    covalent_edge_start_t: null
+    covalent_edge_separate_params: false
+    type_hidden: 128
+    pair_head_hidden: 128
+    min_sep_all: 4
+    min_sep_ss: 3
+    allow_ht_alt_pairs: false
+    ht_alt_min_end: 1
+    mask_mode: teacher
+    relax_residue_constraints: true
+    lambda_cyc_max: 1.0
+    lambda_cyc_schedule: linear
+    lambda_b_max: 1.0
+    lambda_g_max: 1.0
+    struct_proj_dim: 32
+    pair_struct_refine: true
+    pair_struct_refine_hidden: 64
+    pair_cyc_refine: true
+    pair_cyc_refine_hidden: 64
+    enable_pocket_cross_attn: false
+    pocket_cross_attn_dropout: 0.0
+  loss_opt:
+    enable_type_loss: true
+    w_type: 1.0
+    w_pair: 1.0
+    w_ring: 0.2
+    sigma_ring: 1.0
+    pair_loss_requires_type_match: false
+    ignore_ht_pair_loss: true
+    mu_c:
+      HT: 3.8
+      SS: 5.5
+      ISO: 5.0
+
+sample_opt:
+  pbar: false
+  strict_ckpt_check: true
+  energy_func: default
+  energy_lambda: 0.8
+  autoencoder_n_iter: 1
+  t_hard: 10
+  num_samples: 10
+  enable_length_override: false
+  pep_len: null
+  pep_len_min: null
+  pep_len_max: null
+  auto_min_pep_len: 8
+  auto_min_pep_len_threshold: 7
+  return_pair_trajectory: false
+  use_cg_guidance: false
+  property_ckpt: null
+  property_ckpts: null
+  guidance_w: null
+  guidance_w_map: null
+  guidance_w_min: null
+  guidance_w_max: null
+  guidance_grad_norm_balance: false
+  guidance_grad_norm_eps: 1.0e-6
+  guidance_grad_norm_ref: mean
+  lambda_max: 0.0
+  t_guidance_start: 0
+  t_guidance_end: 0
+
+pdb_root: CPSea/Model_Generation_and_Evaluation/TestSet/LNR/LNR_complex
+rec_chain: R
+lig_chain: L

@@ -1,0 +1,110 @@
+dataset:
+  train_jsonl: cpcore_train.jsonl
+  pdb_dir: CPCore_pdb
+  train_ids: DataSplit/CPCore_train.txt
+  valid_ids: DataSplit/CPCore_valid.txt
+  type_list: [HT, SS, ISO]
+  chain_id: R
+  backbone_only: false
+  use_mmap: true
+  mmap_dir: APCyc/router/mmap
+  build_mmap: false
+
+training:
+  train_mode: stage
+  val_ratio: 0.1
+  seed: 2024
+  batch_size: 64
+  num_workers: 4
+  learning_rate: 0.0002
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  lambda1: 1.0
+  lambda2: 1.0
+
+model:
+  embed_size: 256
+  hidden_size: 256
+  encoder_layers: 4
+  encoder_dropout: 0.1
+  channel_nf: 64
+  radial_nf: 128
+  max_position: 2048
+  max_peptide_len: 128
+  edge_mode: knn
+  edge_k: 16
+  edge_radius: 8.0
+  site_heads: 4
+  site_dropout: 0.1
+  type_condition: add
+  no_cross_attention: false
+
+imbalance:
+  use_type_weighted_ce: false
+  type_class_weights: "HT:1.69,ISO:0.636,SS:2.39"
+  use_class_balanced_sampler: true
+  sampler_target: "ISO:0.5,HT:0.25,SS:0.25"
+  use_type_soft: true
+  type_soft_weight: 1.0
+  use_pair_soft: true
+  pair_soft_weight: 0.5
+
+pairs:
+  pair_rule: default
+  pair_min_sep: 1
+
+joint:
+  joint_type_condition: gt
+  joint_wrong_type_weight: 0.0
+  enable_stage3: true
+  stage3_type_condition: mix
+  stage3_pred_prob: 0.5
+
+early_stopping:
+  stage1_monitor: type_acc
+  stage1_patience: 10
+  stage1_min_delta: 0.002
+  stage1_max_epochs: 99999
+  stage2_monitor: site_top5
+  stage2_patience: 10
+  stage2_min_delta: 0.005
+  stage2_max_epochs: 99999
+  stage3_monitor: joint_top5
+  stage3_patience: 10
+  stage3_min_delta: 0.003
+  stage3_max_epochs: 99999
+  joint_monitor: joint_top5
+
+logging:
+  site_topk: [1, 5, 10]
+  output_dir: APCyc/router/models
+  log_dir: APCyc/router/logs
+  run_name: stage123
+  result_dir: APCyc/router/results
+  result_name: stage123
+
+scheduler:
+  use_scheduler: true
+  scheduler_class: ReduceLROnPlateau
+  scheduler_factor: 0.5
+  scheduler_patience: 3
+  scheduler_mode: auto
+  scheduler_threshold: null
+  scheduler_cooldown: 0
+  scheduler_min_lr: 1.0e-6
+  scheduler_verbose: 1
+  scheduler_monitor: auto
+
+pretrained:
+  pretrained_mode: none
+  pretrained_ckpt: null
+  freeze_mode: none
+  freeze_layers: 0
+  resume_router_ckpt: null
+
+search:
+  search: false
+  search_lr: "1e-4,2e-4"
+  search_weight_decay: "5e-3,1e-2"
+  search_batch_size: "32,64"
+  search_metric: joint_top5

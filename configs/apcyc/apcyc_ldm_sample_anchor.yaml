@@ -1,0 +1,68 @@
+dataset:
+  train:
+    class: CPCoreDataset
+    pdb_root: CPSea/Model_Generation_and_Evaluation/TestSet/LNR/LNR_complex
+    index_path: CPSea/Model_Generation_and_Evaluation/TestSet/LNR/lnr_index.txt
+    jsonl_path: CPSea/Model_Generation_and_Evaluation/TestSet/LNR/lnr_meta.jsonl
+    rec_chain: R
+    lig_chain: L
+    pocket_json_dir: epitopes_glad_json_dir
+    pocket_json_suffix: _complex_pocket.json
+    require_pocket: true
+    strict_context: true
+    backbone_only: false
+    return_supervision: false
+    return_sample_id: true
+  test:
+    class: CPCoreDataset
+    pdb_root: CPSea/Model_Generation_and_Evaluation/TestSet/LNR/LNR_complex
+    index_path: CPSea/Model_Generation_and_Evaluation/TestSet/LNR/lnr_index.txt
+    jsonl_path: CPSea/Model_Generation_and_Evaluation/TestSet/LNR/lnr_meta.jsonl
+    rec_chain: R
+    lig_chain: L
+    pocket_json_dir: epitopes_glad_json_dir
+    pocket_json_suffix: _complex_pocket.json
+    require_pocket: true
+    strict_context: true
+    backbone_only: false
+    return_supervision: false
+    return_sample_id: true
+
+dataloader:
+  batch_size: 1
+  val_batch_size: 1
+  shuffle: false
+  num_workers: 4
+
+sample_opt:
+  pbar: true
+  strict_ckpt_check: true
+  energy_func: default
+  energy_lambda: 0.8
+  autoencoder_n_iter: 1
+  t_hard: 10
+  num_samples: 10
+  enable_length_override: false
+  pep_len: null
+  pep_len_min: null
+  pep_len_max: null
+  auto_min_pep_len: 8
+  auto_min_pep_len_threshold: 7
+  return_pair_trajectory: false
+  use_cg_guidance: false
+  property_ckpt: null
+  property_ckpts: null
+  guidance_w: null
+  guidance_w_map: null
+  guidance_w_min: null
+  guidance_w_max: null
+  guidance_grad_norm_balance: false
+  guidance_grad_norm_eps: 1.0e-6
+  guidance_grad_norm_ref: mean
+  lambda_max: 0.0
+  t_guidance_start: 0
+  t_guidance_end: 0
+
+pdb_root: CPSea/Model_Generation_and_Evaluation/TestSet/LNR/LNR_complex
+rec_chain: R
+lig_chain: L

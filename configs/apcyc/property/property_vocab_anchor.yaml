@@ -1,0 +1,54 @@
+cyc_enhance:
+  enable_enlarged_vocab: true
+  vocab_mode: minimal
+  vocab_custom_map: null
+
+model:
+  class: APCycLDMPepDesign
+  autoencoder_ckpt: ckpts/Anchor/APCyc_AE/version_2/checkpoint/epoch67_step159324.ckpt
+  autoencoder_no_randomness: false
+  hidden_size: 128
+  num_steps: 100
+  n_layers: 4
+  dist_rbf: 32
+  dist_rbf_cutoff: 7.0
+  n_rbf: 32
+  cutoff: 1.0
+  max_gen_position: 64
+  mode: codesign
+  diffusion_opt:
+    std: 10.0
+  pair_opt:
+    enable_pair_injection: true
+    enable_covalent_edges: false
+    pair_anchor_mode: ca
+    pair_anchor_channel_idx: 0
+    pair_struct_refine: false
+    pair_cyc_refine: false
+
+property_train:
+  epochs: 9999
+  lr: 1.0e-4
+  batch_size: 1
+  val_batch_size: 1
+  num_workers: 4
+  use_dynamic_batch: true
+  batch_complexity: n**2
+  ubound_per_batch: 60000
+  use_covariance_matrix: true
+  property_use_pair_injection: false
+  predictor_hidden_size: 128
+  predictor_layers: 1
+  predictor_mlp_hidden: 64
+  predictor_use_attn_pool: false
+  predictor_use_pair_stats: false
+  scheduler: plateau
+  plateau_factor: 0.6
+  plateau_patience: 3
+  plateau_min_lr: 5.0e-6
+  early_stop_patience: 10
+  save_topk: 3
+  separate_property_models: true
+  per_property_hidden_size: 128
+  per_property_layers: 1
+  per_property_mlp_hidden: 64

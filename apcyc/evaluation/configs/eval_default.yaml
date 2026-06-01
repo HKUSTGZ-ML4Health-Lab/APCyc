@@ -1,0 +1,78 @@
+K: 1
+aggregation:
+  - mean_over_valid
+  - best_of_k
+validity_filter: true
+force_valid_all: false
+skip_energy_metrics: true
+
+peptide_chain: L
+receptor_chain: R
+
+tm_score_bin: ppflow/bin/TMscore/TMscore
+
+rosetta:
+  enabled: true
+  calc_cpsea_dg: true
+  calc_pepglad_dg: true
+  relax: true
+  engine: pyrosetta
+  energy_mode: interface_dg
+  also_total_score: true
+  total_score_scope: complex
+  scorefxn: ref2015
+  rosetta_bin: /hpc2hdd/home/yzhao642/Peptide/Tools/rosetta.binary.ubuntu.release-408/main/source/bin/rosetta_scripts.static.linuxgccrelease
+  rosetta_xml: CPSea/Model_Generation_and_Evaluation/Evaluation/interface_analyze.xml
+  require_receptor: true
+  subset: all
+  move_bb: true
+  scorefxn: ref2015
+  max_iter: 1000
+  timeout: null
+
+rama:
+  data_dir: CPSea/Model_Generation_and_Evaluation/Evaluation/data
+
+clustering:
+  rmsd_threshold: 4.0
+  seq_similarity_threshold: 0.4
+  linkage: single
+
+cyclization:
+  cb_cb_low: 3.0
+  cb_cb_high: 8.0
+  fallback_atom: CA
+  assume_terminal_pair_if_missing: true
+
+ppflow_validity:
+  enabled: true
+  tol: 0.5
+
+vina:
+  enabled: true
+  auto: true
+  score_csv: null
+  modes:
+    - score_only
+    - local_only
+  mgl_pythonsh: /hpc2hdd/home/yzhao642/Peptide/Tools/mgltools_x86_64Linux2_1.5.7/bin/pythonsh
+  prepare_ligand: /hpc2hdd/home/yzhao642/Peptide/Tools/mgltools_x86_64Linux2_1.5.7/MGLToolsPckgs/AutoDockTools/Utilities24/prepare_ligand4.py
+  prepare_receptor: /hpc2hdd/home/yzhao642/Peptide/Tools/mgltools_x86_64Linux2_1.5.7/MGLToolsPckgs/AutoDockTools/Utilities24/prepare_receptor4.py
+  conda_env: vina
+  conda_bin: /hpc2hdd/home/yzhao642/miniconda3/bin/conda
+  vina_bin: /hpc2hdd/home/yzhao642/miniconda3/envs/vina/bin/vina
+  cpu: 64
+  auto_box: true
+  box_padding_by_mode:
+    score_only: 8.0
+    local_only: 10.0
+    minimize: 10.0
+  box_min_size_by_mode:
+    score_only: 22.0
+    local_only: 26.0
+    minimize: 26.0
+  debug: true
+  debug_log: ./tmp/vina_debug/vina_debug.log
+
+parallel:
+  num_workers: 5

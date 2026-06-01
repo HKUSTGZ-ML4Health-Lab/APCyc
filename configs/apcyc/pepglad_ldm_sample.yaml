@@ -1,0 +1,83 @@
+dataset:
+  train:
+    class: CPCoreDataset
+    pdb_root: CPSea/Model_Generation_and_Evaluation/TestSet/LNR/LNR_complex
+    index_path: CPSea/Model_Generation_and_Evaluation/TestSet/LNR/lnr_index.txt
+    jsonl_path: CPSea/Model_Generation_and_Evaluation/TestSet/LNR/lnr_meta.jsonl
+    rec_chain: R
+    lig_chain: L
+    pocket_json_dir: epitopes_glad_json_dir
+    pocket_json_suffix: _complex_pocket.json
+    require_pocket: true
+    use_covariance_matrix: true
+    backbone_only: false
+    return_supervision: false
+    return_sample_id: true
+  test:
+    class: CPCoreDataset
+    pdb_root: CPSea/Model_Generation_and_Evaluation/TestSet/LNR/LNR_complex
+    index_path: CPSea/Model_Generation_and_Evaluation/TestSet/LNR/lnr_index.txt
+    jsonl_path: CPSea/Model_Generation_and_Evaluation/TestSet/LNR/lnr_meta.jsonl
+    rec_chain: R
+    lig_chain: L
+    pocket_json_dir: epitopes_glad_json_dir
+    pocket_json_suffix: _complex_pocket.json
+    require_pocket: true
+    use_covariance_matrix: true
+    backbone_only: false
+    return_supervision: false
+    return_sample_id: true
+
+dataloader:
+  batch_size: 1
+  val_batch_size: 1
+  shuffle: false
+  num_workers: 4
+
+model:
+  class: LDMPepDesign
+  autoencoder_ckpt: ckpts/PepGLAD/autoencoder.ckpt
+  autoencoder_no_randomness: true
+  hidden_size: 128
+  num_steps: 100
+  n_layers: 3
+  n_rbf: 32
+  cutoff: 3.0
+  dist_rbf: 32
+  dist_rbf_cutoff: 7.0
+  max_gen_position: 30
+  mode: codesign
+  diffusion_opt:
+    trans_seq_type: Diffusion
+    trans_pos_type: Diffusion
+
+sample_opt:
+  pbar: true
+  strict_ckpt_check: true
+  energy_func: default
+  energy_lambda: 0.8
+  autoencoder_n_iter: 1
+  t_hard: 10
+  num_samples: 10
+  enable_length_override: false
+  pep_len: null
+  pep_len_min: null
+  pep_len_max: null
+  return_pair_trajectory: false
+  use_cg_guidance: false
+  property_ckpt: null
+  property_ckpts: null
+  guidance_w: null
+  guidance_w_map: null
+  guidance_w_min: null
+  guidance_w_max: null
+  guidance_grad_norm_balance: false
+  guidance_grad_norm_eps: 1.0e-6
+  guidance_grad_norm_ref: mean
+  lambda_max: 0.0
+  t_guidance_start: 0
+  t_guidance_end: 0
+
+pdb_root: CPSea/Model_Generation_and_Evaluation/TestSet/LNR/LNR_complex
+rec_chain: R
+lig_chain: L
