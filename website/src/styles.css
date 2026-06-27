@@ -1,0 +1,133 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-paper: var(--paper);
+  --color-bio-blue: var(--bio-blue);
+  --color-bio-cyan: var(--bio-cyan);
+  --color-bio-aqua: var(--bio-aqua);
+  --color-bio-green: var(--bio-green);
+  --color-bio-lime: var(--bio-lime);
+  --color-bio-amber: var(--bio-amber);
+  --color-bio-orange: var(--bio-orange);
+  --color-bio-rose: var(--bio-rose);
+  --color-bio-violet: var(--bio-violet);
+  --font-display: "Newsreader", "Iowan Old Style", Georgia, serif;
+  --font-serif: "Newsreader", "Iowan Old Style", Georgia, serif;
+  --font-sans: "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+:root {
+  --radius: 0.9rem;
+  --background: #FBF8F2;
+  --paper: #FFFFFF;
+  --foreground: #0E1726;
+  --ink: #0E1726;
+  --ink-soft: #5B6B82;
+  --bio-blue: #2B5BFF;
+  --bio-cyan: #0EA5E9;
+  --bio-aqua: #06B6D4;
+  --bio-green: #10B981;
+  --bio-lime: #65A30D;
+  --bio-amber: #F59E0B;
+  --bio-orange: #F97316;
+  --bio-rose: #F43F5E;
+  --bio-violet: #7C3AED;
+  --card: #FFFFFF;
+  --card-foreground: #0E1726;
+  --primary: #2B5BFF;
+  --primary-foreground: #FFFFFF;
+  --secondary: #F1EEE7;
+  --secondary-foreground: #0E1726;
+  --muted: #F4F1EA;
+  --muted-foreground: #5B6B82;
+  --accent: #EEF2FF;
+  --accent-foreground: #0E1726;
+  --destructive: #F43F5E;
+  --border: rgba(14,23,38,0.10);
+  --input: rgba(14,23,38,0.12);
+  --ring: rgba(43,91,255,0.45);
+}
+
+@layer base {
+  * { border-color: var(--color-border); }
+  html { scroll-behavior: smooth; scroll-padding-top: 80px; }
+  body {
+    background:
+      radial-gradient(1100px 700px at 88% -10%, rgba(124,58,237,0.10), transparent 60%),
+      radial-gradient(900px 600px at -8% 8%, rgba(14,165,233,0.10), transparent 60%),
+      radial-gradient(900px 600px at 50% 110%, rgba(244,63,94,0.08), transparent 60%),
+      #FBF8F2;
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3, h4 {
+    font-family: var(--font-display);
+    letter-spacing: -0.02em;
+    font-weight: 500;
+    font-optical-sizing: auto;
+  }
+}
+
+@utility card-surface {
+  background: #ffffff;
+  border: 1px solid rgba(14,23,38,0.08);
+  border-radius: 1rem;
+  box-shadow: 0 1px 0 rgba(14,23,38,0.02), 0 10px 30px -18px rgba(14,23,38,0.18);
+}
+@utility card-tinted {
+  background: linear-gradient(180deg, #ffffff 0%, #FBF7EE 100%);
+  border: 1px solid rgba(14,23,38,0.08);
+  border-radius: 1rem;
+  box-shadow: 0 1px 0 rgba(14,23,38,0.02), 0 18px 40px -22px rgba(14,23,38,0.18);
+}
+@utility soft-chip {
+  background: #ffffff;
+  border: 1px solid rgba(14,23,38,0.10);
+  border-radius: 9999px;
+}
+@utility text-gradient {
+  background: linear-gradient(120deg, #2B5BFF 0%, #7C3AED 50%, #F43F5E 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+@utility grid-bg {
+  background-image:
+    linear-gradient(rgba(14,23,38,0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(14,23,38,0.05) 1px, transparent 1px);
+  background-size: 44px 44px;
+}
+@utility ring-glow {
+  box-shadow: 0 0 0 1px rgba(43,91,255,0.18), 0 30px 60px -28px rgba(43,91,255,0.35);
+}
+
+@source inline("text-bio-blue text-bio-cyan text-bio-aqua text-bio-green text-bio-lime text-bio-amber text-bio-orange text-bio-rose text-bio-violet bg-bio-blue bg-bio-cyan bg-bio-aqua bg-bio-green bg-bio-lime bg-bio-amber bg-bio-orange bg-bio-rose bg-bio-violet border-bio-blue/40 border-bio-cyan/40 border-bio-aqua/40 border-bio-green/40 border-bio-lime/40 border-bio-amber/40 border-bio-rose/40 border-bio-violet/40 bg-bio-blue/10 bg-bio-cyan/10 bg-bio-aqua/10 bg-bio-green/10 bg-bio-lime/10 bg-bio-amber/10 bg-bio-rose/10 bg-bio-violet/10 bg-bio-blue/[0.06] bg-bio-green/[0.08] bg-bio-lime/[0.08] bg-bio-rose/[0.08] text-bio-blue/10 text-bio-cyan/10 text-bio-green/10 text-bio-rose/10 text-bio-violet/10 text-bio-amber/10 text-bio-lime/10");
