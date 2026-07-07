@@ -34,6 +34,9 @@ const RADAR_URL = assetUrl("assets/apcyc/radar.png");
 const DENOISING_2XYI_URL = assetUrl("assets/apcyc/denoising_2xyi.mp4");
 const DENOISING_5Y59_URL = assetUrl("assets/apcyc/denoising_5y59.mp4");
 const DENOISING_1T4F_URL = assetUrl("assets/apcyc/denoising_1t4f.mp4");
+const POCKET_1T4F_URL = assetUrl("assets/apcyc/APCyc_final_1t4f.png");
+const POCKET_2NP0_URL = assetUrl("assets/apcyc/APCyc_final_2np0.png");
+const POCKET_2QOS_URL = assetUrl("assets/apcyc/APCyc_final_2qos.png");
 
 type SectionProps = {
   id?: string;
@@ -547,6 +550,46 @@ function Injection() {
   );
 }
 
+function PocketGallery() {
+  const pockets = [
+    {
+      pdb: "1T4F",
+      src: POCKET_1T4F_URL,
+      alt: "APCyc-designed cyclic peptide bound to receptor pocket 1t4f.",
+    },
+    {
+      pdb: "2NP0",
+      src: POCKET_2NP0_URL,
+      alt: "APCyc-designed cyclic peptide bound to receptor pocket 2np0.",
+    },
+    {
+      pdb: "2QOS",
+      src: POCKET_2QOS_URL,
+      alt: "APCyc-designed cyclic peptide bound to receptor pocket 2qos.",
+    },
+  ];
+
+  return (
+    <Section eyebrow="Demo" title="APCyc-designed cyclic peptides in target pockets">
+      <div className="grid md:grid-cols-3 gap-5">
+        {pockets.map((pocket) => (
+          <figure key={pocket.pdb} className="card-surface p-4 md:p-5">
+            <figcaption className="text-[11px] uppercase tracking-[0.18em] text-bio-blue mb-4 font-mono">
+              PDB <span className="font-semibold">{pocket.pdb}</span>
+            </figcaption>
+            <img
+              src={pocket.src}
+              alt={pocket.alt}
+              loading="lazy"
+              className="w-full aspect-[13/10] object-contain rounded-xl bg-white"
+            />
+          </figure>
+        ))}
+      </div>
+    </Section>
+  );
+}
+
 function Guidance() {
   const props = [
     ["Affinity", "↑", "bio-blue"],
@@ -785,15 +828,12 @@ function DenoisingDemos() {
 
   return (
     <Section
-      id="demos"
-      eyebrow="Demo"
+      id="denoising"
+      eyebrow="Denoising"
       title="Denoising in action: from noise to cyclic peptide"
       sub="Pick a target pocket. Each clip shows APCyc denoising a latent sample into a target-aware cyclic peptide."
     >
       <div className="mx-auto max-w-5xl">
-        <div className="text-center mb-3">
-          <span className="text-sm font-medium text-ink-soft">Example Target-aware Generation</span>
-        </div>
         <div className="flex flex-wrap items-center justify-center gap-3 mb-6">
           {demos.map((d, i) => (
             <button
@@ -1259,12 +1299,13 @@ export function Index() {
       <Concept />
       <MethodOverview />
       <Injection />
-      <DenoisingDemos />
+      <PocketGallery />
       <Results />
       <CaseStudy />
       <Ablation />
       <Guidance />
       <Dataset />
+      <DenoisingDemos />
       <Citation />
       <Footer />
     </div>
