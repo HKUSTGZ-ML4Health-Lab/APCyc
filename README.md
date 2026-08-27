@@ -1,4 +1,4 @@
-# APCyc: Autonomous Cyclization and Property-Aware Design for Cyclic Peptides
+# APCyc: Property-Informed Design of Cyclic Peptides via Automated Cyclization
 
 <div align="center">
 
