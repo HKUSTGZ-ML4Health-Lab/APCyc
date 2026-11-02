@@ -4,10 +4,11 @@ A generator bundle embeds its AE, architecture, vocabulary and geometry calibrat
 
 ## Download from Hugging Face
 
-From the repository root, install the download client and fetch a generator bundle:
+Sign in to Hugging Face and agree to the access conditions on the [model page](https://huggingface.co/qiaoqian0214/APCyc). Access is granted automatically. From the repository root, install the download client, authenticate with the same account and fetch a generator bundle:
 
 ```bash
 python -m pip install huggingface_hub
+hf auth login
 python - <<'PY'
 from huggingface_hub import hf_hub_download
 
@@ -15,6 +16,7 @@ hf_hub_download(
     repo_id="qiaoqian0214/APCyc",
     filename="weights/apcyc-legacy-vocab.pt",
     local_dir="outputs/models",
+    token=True,
 )
 PY
 python scripts/make_example.py --out outputs/input

@@ -43,6 +43,8 @@ cd APCyc
 
 Download pretrained generator bundles and property-scoring models from [Hugging Face: qiaoqian0214/APCyc](https://huggingface.co/qiaoqian0214/APCyc).
 
+Sign in to Hugging Face and agree to the access conditions on the model page before downloading. Access is granted automatically.
+
 The weights use the MIT license. Follow the [download and generation example](docs/INFERENCE.md#download-from-hugging-face) to fetch a generator and run it with this code.
 
 Generator bundles embed their AE, architecture, vocabulary and geometry calibration. Download a generator bundle before running the quick start. For decoded-structure guidance, use the supplied frozen scorer; generator-feature guidance requires heads matched to the exact generator and feature implementation. See [Inference](docs/INFERENCE.md#property-guidance) for both routes.
