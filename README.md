@@ -100,4 +100,4 @@ python -m unittest discover -s tests -v
 
 ## License and acknowledgements
 
-The code is distributed under the [MIT license](LICENSE) and builds on [PepGLAD](https://github.com/THUNLP-MT/PepGLAD). See [Third-party components](docs/THIRD_PARTY.md) for component attribution and external tool requirements.
+The code is distributed under the [MIT license](LICENSE). We thank the authors of [PepGLAD](https://github.com/THUNLP-MT/PepGLAD) for open-sourcing their implementation. See [Third-party components](docs/THIRD_PARTY.md) for component attribution and external tool requirements.
