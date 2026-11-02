@@ -60,7 +60,7 @@ def _resolve_symbol(symbol: str) -> str:
     return symbol
 
 
-def _build_minimal_vocab_defs() -> Tuple[List[Dict], Dict[str, Dict]]:
+def _build_minimal_vocab_defs(paper=False) -> Tuple[List[Dict], Dict[str, Dict]]:
     base_symbol_to_abrv, _ = _base_maps()
     token_defs = []
     token_map: Dict[str, Dict] = {'SS': {}, 'ISO': {}, 'HT_N': {}, 'HT_C': {}}
@@ -75,7 +75,7 @@ def _build_minimal_vocab_defs() -> Tuple[List[Dict], Dict[str, Dict]]:
     token_map['SS']['C'] = 'CYS_SSB'
 
     # ISO
-    iso_map = {'K': 'LYS_ISO', 'D': 'ASP_ISO', 'E': 'GLU_ISO'}
+    iso_map = {'K': 'LYS_ISO', 'D': 'ASP_ISO', **({'N': 'ASN_ISO'} if paper else {'E': 'GLU_ISO'})}
     for base_symbol, symbol in iso_map.items():
         token_defs.append({
             'symbol': symbol,
@@ -142,7 +142,7 @@ def apply_enlarged_vocab(cyc_cfg: Dict) -> None:
     if vocab_mode == 'custom' and isinstance(vocab_custom_map, dict):
         token_defs, token_map = _build_custom_vocab_defs(vocab_custom_map)
     else:
-        token_defs, token_map = _build_minimal_vocab_defs()
+        token_defs, token_map = _build_minimal_vocab_defs(paper=vocab_mode == 'paper')
 
     for token in token_defs:
         _ensure_vocab_token(

@@ -1,3 +1,1 @@
-from .version import __version__
-
-__all__ = ['__version__']
+"""APCyc model, inference and property guidance."""

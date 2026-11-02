@@ -17,10 +17,10 @@
 
 """Layers for modeling protein side chain conformations.
 
-This module contains layers for building, measuring, and scoring protein side 
+This module contains layers for building, measuring, and scoring protein side
 chain conformations in a differentiable way. These can be used for tasks such
 as building differentiable all-atom structures from chi-angles, computing chi
-angles from existing structures, and scoring or optimizing side chains using 
+angles from existing structures, and scoring or optimizing side chains using
 symmetry-aware rmsds.
 """
 

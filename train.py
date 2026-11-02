@@ -18,6 +18,7 @@ from utils import register as R
 
 ########### Import your packages below ##########
 import models
+import apcyc.model  # register APCyc only after upstream classes are initialized
 from trainer import create_trainer
 from data import create_dataset, create_dataloader
 from utils.nn_utils import count_parameters
@@ -28,14 +29,20 @@ def parse():
 
     # device
     parser.add_argument('--gpus', type=int, nargs='+', required=True, help='gpu to use, -1 for cpu')
-    parser.add_argument("--local_rank", type=int, default=-1,
+    parser.add_argument("--local_rank", "--local-rank", type=int, default=-1,
                         help="Local rank. Necessary for using the torch.distributed.launch utility.")
-    
+
     # config
     parser.add_argument('--config', type=str, required=True, help='Path to the yaml configure')
     parser.add_argument('--seed', type=int, default=SEED, help='Random seed')
+    parser.add_argument('--preflight-batches', type=int, default=0,
+                        help='Check this many forward/backward batches without optimizer updates.')
+    parser.add_argument('--preflight-out', type=str, help='New directory for preflight checkpoints and reports.')
 
-    return parser.parse_known_args()
+    args, extra = parser.parse_known_args()
+    if args.preflight_batches < 0 or (args.preflight_batches and not args.preflight_out):
+        parser.error('--preflight-batches must be positive and requires --preflight-out')
+    return args, extra
 
 
 def _strip_prefix(state_dict, prefix):
@@ -89,7 +96,16 @@ def load_ckpt(model, ckpt):
         ckpt_path = ckpt.get('path')
         strict = ckpt.get('strict', True)
         skip_mismatch = ckpt.get('skip_mismatch', not strict)
-    trained_model = torch.load(ckpt_path, map_location='cpu')
+    if strict and skip_mismatch:
+        raise ValueError('strict=true and skip_mismatch=true are incompatible; '
+                         'use strict=false for partial initialization.')
+    trust_legacy = isinstance(ckpt, dict) and ckpt.get('trust_legacy_pickle', False)
+    trained_model = torch.load(ckpt_path, map_location='cpu', weights_only=not trust_legacy)
+    if isinstance(trained_model, dict) and 'vocabulary' in trained_model:
+        from data.format import VOCAB
+        vocabulary = [VOCAB.idx_to_symbol(i) for i in range(len(VOCAB))]
+        if trained_model['vocabulary'] != vocabulary:
+            raise ValueError('Warm-start checkpoint vocabulary differs from the configured model.')
     state_dict = _extract_state_dict(model, trained_model)
     if skip_mismatch:
         filtered, missing, unexpected, mismatched = _filter_state_dict_by_shape(model, state_dict)
@@ -102,6 +118,8 @@ def load_ckpt(model, ckpt):
         state_dict = filtered
         strict = False
     model.load_state_dict(state_dict, strict=strict)
+    from utils.checkpoint_utils import restore_geometry
+    restore_geometry(model, trained_model)
     return model
 
 
@@ -119,7 +137,7 @@ def main(args, opt_args):
 
     ########## define your model #########
     model = R.construct(config['model'])
-    if 'load_ckpt' in config:
+    if config.get('load_ckpt'):
         ckpt_path = config['load_ckpt']['path'] if isinstance(config['load_ckpt'], dict) else config['load_ckpt']
         print_log(f'Loading checkpoint: {ckpt_path}')
         model = load_ckpt(model, config['load_ckpt'])
@@ -141,12 +159,20 @@ def main(args, opt_args):
 
     if args.local_rank <= 0:
         print_log(f'Number of parameters: {count_parameters(model) / 1e6} M')
-    
+
     train_loader = create_dataloader(train_set, config['dataloader'], len(args.gpus))
     valid_loader = create_dataloader(valid_set, config['dataloader'], validation=True)
-    
+
     trainer = create_trainer(config, model, train_loader, valid_loader)
-    trainer.train(args.gpus, args.local_rank)
+    try:
+        if args.preflight_batches:
+            from utils.training_preflight import run_trainer_preflight
+            run_trainer_preflight(trainer, args.gpus, args.local_rank, args.preflight_batches, args.preflight_out)
+        else:
+            trainer.train(args.gpus, args.local_rank)
+    finally:
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
 
 
 if __name__ == '__main__':

@@ -17,7 +17,7 @@ class AutoEncoderTrainer(Trainer):
 
     def valid_step(self, batch, batch_idx):
         return self.share_step(batch, batch_idx, val=True)
-    
+
     def _train_epoch_end(self, device):
         dataset = self.train_loader.dataset
         if hasattr(dataset, 'update_epoch'):
@@ -48,9 +48,6 @@ class AutoEncoderTrainer(Trainer):
         self.log(f'Struct/CoordRegloss/{log_type}', coord_reg_loss, batch_idx, val)
         for name in struct_loss_profile:
             self.log(f'Struct/{name}/{log_type}', struct_loss_profile[name], batch_idx, val)
-        # self.log(f'Struct/XLoss/{log_type}', xloss, batch_idx, val)
-        # self.log(f'Struct/BondLoss/{log_type}', bond_loss, batch_idx, val)
-        # self.log(f'Struct/SidechainBondLoss/{log_type}', sc_bond_loss, batch_idx, val)
 
         if not val:
             lr = self.optimizer.state_dict()['param_groups'][0]['lr']

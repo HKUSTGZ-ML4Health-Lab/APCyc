@@ -11,13 +11,15 @@ class MoleculeVocab:
     MAX_ATOM_NUMBER = 14
 
     def __init__(self):
+        self.alias_symbol = {}
+        self.alias_abrv = {}
         self.backbone_atoms = ['N', 'CA', 'C', 'O']
         self.PAD, self.MASK, self.UNK, self.LAT = '#', '*', '?', '&' # pad / mask / unk / latent node
         specials = [# special added
                 (self.PAD, 'PAD'), (self.MASK, 'MASK'), (self.UNK, 'UNK'), # pad / mask / unk
                 (self.LAT, '<L>')  # latent node in latent space
             ]
-        
+
         aas = const.aas
 
         # sms = [(e.lower(), e) for e in const.periodic_table]
@@ -28,7 +30,7 @@ class MoleculeVocab:
         self.atom_pos_sm = 'sml'  # small molecule
 
         # block level vocab
-        self.idx2block = specials + aas + sms 
+        self.idx2block = specials + aas + sms
         self.symbol2idx, self.abrv2idx = {}, {}
         for i, (symbol, abrv) in enumerate(self.idx2block):
             self.symbol2idx[symbol] = i
@@ -44,7 +46,7 @@ class MoleculeVocab:
             self.atom2idx[atom] = i
         for i, atom_pos in enumerate(self.idx2atom_pos):
             self.atom_pos2idx[atom_pos] = i
-    
+
     # block level APIs
 
     def abrv_to_symbol(self, abrv):
@@ -62,42 +64,49 @@ class MoleculeVocab:
     def symbol_to_idx(self, symbol):
         # symbol = symbol.upper()
         return self.symbol2idx.get(symbol, self.abrv2idx['UNK'])
-    
+
     def idx_to_symbol(self, idx):
         return self.idx2block[idx][0]
 
     def idx_to_abrv(self, idx):
         return self.idx2block[idx][1]
 
+    def register_alias(self, symbol, base_symbol, base_abrv):
+        self.alias_symbol[symbol] = base_symbol
+        self.alias_abrv[symbol] = base_abrv
+
+    def resolve_symbol(self, symbol):
+        return self.alias_symbol.get(symbol, symbol)
+
     def get_pad_idx(self):
         return self.symbol_to_idx(self.PAD)
 
     def get_mask_idx(self):
         return self.symbol_to_idx(self.MASK)
-    
+
     def get_special_mask(self):
         return copy(self.special_mask)
-    
-    # atom level APIs 
+
+    # atom level APIs
 
     def get_atom_pad_idx(self):
         return self.atom2idx[self.atom_pad]
-    
+
     def get_atom_mask_idx(self):
         return self.atom2idx[self.atom_mask]
-    
+
     def get_atom_latent_idx(self):
         return self.atom2idx[self.atom_latent]
-    
+
     def get_atom_pos_pad_idx(self):
         return self.atom_pos2idx[self.atom_pos_pad]
 
     def get_atom_pos_mask_idx(self):
         return self.atom_pos2idx[self.atom_pos_mask]
-    
+
     def get_atom_pos_latent_idx(self):
         return self.atom_pos2idx[self.atom_pos_latent]
-    
+
     def idx_to_atom(self, idx):
         return self.idx2atom[idx]
 
@@ -107,7 +116,7 @@ class MoleculeVocab:
 
     def idx_to_atom_pos(self, idx):
         return self.idx2atom_pos[idx]
-    
+
     def atom_pos_to_idx(self, atom_pos):
         return self.atom_pos2idx.get(atom_pos, self.atom_pos2idx[self.atom_pos_mask])
 
@@ -115,7 +124,7 @@ class MoleculeVocab:
 
     def get_num_atom_type(self):
         return len(self.idx2atom)
-    
+
     def get_num_atom_pos(self):
         return len(self.idx2atom_pos)
 
@@ -147,19 +156,19 @@ class Atom:
 
     def get_element(self):
         return self.element
-    
+
     def get_coord(self):
         return copy(self.coordinate)
-    
+
     def get_pos_code(self):
         return self.pos_code
-    
+
     def __str__(self) -> str:
         return self.name
 
     def __repr__(self) -> str:
         return f"Atom ({self.name}): {self.element}({self.pos_code}) [{','.join(['{:.4f}'.format(num) for num in self.coordinate])}]"
-    
+
     def to_tuple(self):
         return (
             self.name,
@@ -167,7 +176,7 @@ class Atom:
             self.element,
             self.pos_code
         )
-    
+
     @classmethod
     def from_tuple(self, data):
         return Atom(
@@ -187,14 +196,14 @@ class Block:
 
     def __len__(self) -> int:
         return len(self.units)
-    
+
     def __iter__(self) -> Iterator[Atom]:
         return iter(self.units)
-    
+
     def get_unit_by_name(self, name: str) -> Atom:
         idx = self._uname2idx[name]
         return self.units[idx]
-    
+
     def has_unit(self, name: str) -> bool:
         return name in self._uname2idx
 
@@ -204,10 +213,10 @@ class Block:
             [unit.to_tuple() for unit in self.units],
             self.id
         )
-    
+
     def is_residue(self):
         return self.has_unit('CA') and self.has_unit('N') and self.has_unit('C') and self.has_unit('O')
-   
+
     @classmethod
     def from_tuple(self, data):
         return Block(
@@ -215,6 +224,6 @@ class Block:
             units=[Atom.from_tuple(unit_data) for unit_data in data[1]],
             id=data[2]
         )
-    
+
     def __repr__(self) -> str:
         return f"Block ({self.abrv}):\n\t" + '\n\t'.join([repr(at) for at in self.units]) + '\n'

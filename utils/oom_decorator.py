@@ -18,11 +18,11 @@ def oom_decorator(forward):
             return output
         except RuntimeError as e:
             if 'out of memory' in str(e):
-                output = sum([p.norm() for p in self.parameters() if p.dtype == torch.float]) * 0.0
-                return OOMReturn(output)
+                # Do not allocate a replacement graph when memory is exhausted.
+                return OOMReturn(None)
             else:
                 raise e
-    
+
     return deco_func
 
 
@@ -30,14 +30,13 @@ def safe_backward(loss, model):
     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
         loss.backward() # regrettedly, we cannot handle backward oom in distributed training
         return True
-    
+
     try:
         loss.backward()
         return True
     except RuntimeError as e:
         if 'out of memory' in str(e):
-            fake_loss = sum([p.norm() for p in model.parameters() if p.dtype == torch.float]) * 0.0
-            fake_loss.backward()
+            model.zero_grad(set_to_none=True)
             torch.cuda.empty_cache()
             return False
         else:

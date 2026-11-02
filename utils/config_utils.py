@@ -1,28 +1,38 @@
 #!/usr/bin/python
 # -*- coding:utf-8 -*-
 from typing import List
+import yaml
 
 
 def format_args(args: List[str]):
-    clean_args = []
-    for arg in args:
-        if not (arg.startswith('-') or arg.startswith('--')): # value
-            clean_args.append(arg)
+    pairs = []
+    index = 0
+    while index < len(args):
+        key = args[index].lstrip('-')
+        if '=' in key:
+            key, value = key.split('=', 1)
+            index += 1
         else:
-            arg = arg.lstrip('-').lstrip('-')
-            clean_args.extend(arg.split('='))
-    return clean_args
+            if index + 1 >= len(args):
+                raise ValueError(f'Missing override value for {key}')
+            value = args[index + 1]
+            index += 2
+        if not key:
+            raise ValueError('Empty configuration override key')
+        pairs.extend([key, value])
+    return pairs
 
 
 def get_parent_dict(config: dict, key: str):
     key_each_depth = key.split('.')
     for k in key_each_depth[:-1]:
-        if k not in config:
+        if not isinstance(config, dict) or k not in config:
             raise KeyError(f'Path key {key} not in the dict')
         config = config[k]
+    if not isinstance(config, dict) or key_each_depth[-1] not in config:
+        raise KeyError(f'Unknown configuration path: {key}')
     return config, key_each_depth[-1] # last key
 
-#例子：args = ['training.lr', '0.0001', 'model.name', 'ResNet']
 #
 def overwrite_values(config:dict, opt_args:List):
     #去掉字符串中的杠杠
@@ -32,21 +42,11 @@ def overwrite_values(config:dict, opt_args:List):
     for key, value in zip(keys, values):
         parent, last_key = get_parent_dict(config, key)
         ori_value = parent[last_key]
-        parent[last_key] = type(ori_value)(value)
+        parsed = value if isinstance(ori_value, str) else yaml.safe_load(value)
+        if ori_value is not None and type(parsed) is not type(ori_value):
+            if isinstance(ori_value, float) and type(parsed) is int:
+                parsed = float(parsed)
+            else:
+                raise ValueError(f'Override {key} must be {type(ori_value).__name__}, got {parsed!r}')
+        parent[last_key] = parsed
     return config
-'''
-例子
-config = {
-    "training": {
-        "lr": 0.001,           # 学习率
-        "batch_size": 32,      # 批大小
-        "epochs": 100          # 训练轮数
-    },
-    "model": {
-        "name": "UNet",        # 模型名字
-        "depth": 4,            # 网络层数
-        "features": 64         # 初始通道数
-    }
-}
-
-'''

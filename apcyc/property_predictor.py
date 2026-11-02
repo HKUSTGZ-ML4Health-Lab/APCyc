@@ -122,7 +122,7 @@ class PropertyPredictor(nn.Module):
         cutoff: float = 1.0,
         dropout: float = 0.1,
         time_embed_dim: int = 64,
-        n_properties: int = 7,
+        n_properties: int = 5,
         edge_type_vocab_size: int = 4,
         pos_embed_size: int = 4096,
         stats_topk: int = 5,

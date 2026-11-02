@@ -1,0 +1,160 @@
+# Paper Appendix C measurements only. External software is installed separately.
+chain: L
+stages:
+  camsol:
+    enabled: true
+    required_env:
+    - CAMSOL_PYTHON
+    - CAMSOL_USERNAME
+    - CAMSOL_PASSWORD
+    - GECKODRIVER_PATH
+    - FIREFOX_BINARY
+    argv:
+    - ${CAMSOL_PYTHON}
+    - '{repo}/pipelines/adapters/camsol_browser.py'
+    - --input-file
+    - '{fasta}'
+    - --result-csv
+    - '{stage_output}'
+    - --fail-csv
+    - '{stage_dir}/failures.csv'
+    - --no-checkpoint
+    dependencies:
+    - '{repo}/pipelines/adapters/camsol_browser.py'
+    columns:
+      camsol_score: camsol_score
+    id_column: id
+    timeout_seconds: 7200
+  proteolysis:
+    enabled: true
+    required_env:
+    - PROSPER_PYTHON
+    - PROSPER_ROOT
+    argv:
+    - ${PROSPER_PYTHON}
+    - '{repo}/pipelines/adapters/proteolysis.py'
+    - --fasta
+    - '{fasta}'
+    - --out
+    - '{stage_output}'
+    - --prosperous-dir
+    - ${PROSPER_ROOT}
+    - --jobs
+    - '1'
+    - --process-num
+    - '1'
+    - --stride
+    - '2'
+    - --max-windows
+    - '30'
+    dependencies:
+    - '{repo}/pipelines/adapters/proteolysis.py'
+    columns:
+      cycpep_proteolysis_sumscore: proteolysis_sumscore
+    id_column: id
+  immunogenicity:
+    enabled: true
+    required_env:
+    - BIGMHC_PYTHON
+    - BIGMHC_SCRIPT
+    argv:
+    - ${BIGMHC_PYTHON}
+    - ${BIGMHC_SCRIPT}
+    - --fasta
+    - '{fasta}'
+    - --allele
+    - HLA-A*02:01
+    - --out
+    - '{stage_output}'
+    - --failures
+    - '{stage_dir}/failures.csv'
+    - --devices
+    - cpu
+    dependencies:
+    - ${BIGMHC_SCRIPT}
+    columns:
+      immune_el: el
+      immune_im: im
+    id_column: id
+  hydrophobicity:
+    enabled: true
+    required_env:
+    - CPSEA_PYTHON
+    - CPSEA_WATER_OR_OIL
+    argv:
+    - ${CPSEA_PYTHON}
+    - ${CPSEA_WATER_OR_OIL}
+    - -i
+    - '{pdb_list}'
+    - -o
+    - '{stage_output}'
+    - -c
+    - '1'
+    - --chain_id
+    - '{chain}'
+    dependencies:
+    - ${CPSEA_WATER_OR_OIL}
+    columns:
+      logP: logP
+      TPSA: TPSA
+      rTPSA: tpsa_over_atom
+    id_column: input
+    id_normalization: pdb_stem
+  vina:
+    enabled: true
+    required_env:
+    - VINA_PYTHON
+    - CPSEA_VINA_SCRIPT
+    - VINA_BIN
+    - MGLTOOLS_PYTHONSH
+    - MGLTOOLS_PREPARE_LIGAND
+    - MGLTOOLS_PREPARE_RECEPTOR
+    argv:
+    - ${VINA_PYTHON}
+    - ${CPSEA_VINA_SCRIPT}
+    - -i
+    - '{pdb_list}'
+    - -o
+    - '{stage_output}'
+    - -c
+    - '1'
+    dependencies:
+    - ${CPSEA_VINA_SCRIPT}
+    - ${VINA_BIN}
+    columns:
+      vina_score: affinity
+    id_column: input
+    id_normalization: pdb_stem
+  rosetta:
+    enabled: true
+    artifacts:
+    - '{stage_dir}/results.protocol.json'
+    required_env:
+    - ROSETTA_PYTHON
+    - CPSEA_EVAL_DIR
+    - ROSETTA_BIN
+    argv:
+    - ${ROSETTA_PYTHON}
+    - '{repo}/pipelines/adapters/rosetta.py'
+    - --pdb-dir
+    - '{inputs}'
+    - --out
+    - '{stage_output}'
+    - --cores
+    - '1'
+    - --eval-dir
+    - ${CPSEA_EVAL_DIR}
+    - --rosetta-bin
+    - ${ROSETTA_BIN}
+    - --rosetta-xml
+    - '{repo}/configs/evaluation/rosetta.xml'
+    dependencies:
+    - '{repo}/pipelines/adapters/rosetta.py'
+    - ${CPSEA_EVAL_DIR}/rosetta_analysis.py
+    - ${ROSETTA_BIN}
+    - '{repo}/configs/evaluation/rosetta.xml'
+    columns:
+      rosetta_dG: rosetta_dG
+      rosetta_total_score: rosetta_total_score
+    id_column: id
+    id_normalization: pdb_stem

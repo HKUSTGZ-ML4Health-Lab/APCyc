@@ -1,0 +1,35 @@
+# Frozen bundle supplies all architecture and vocabulary. Paper objectives.
+property_train:
+  generator_bundle: /path/to/models/apcyc.pt
+  t_hard: 10
+  property_keys:
+  - affinity
+  - cycpep_proteolysis_sumscore
+  - Pproxy
+  - solubility_camsol_score
+  - Sfinal
+  epochs: 9999
+  lr: 0.0001
+  batch_size: 1
+  val_batch_size: 10
+  num_workers: 4
+  use_dynamic_batch: true
+  batch_complexity: n**2
+  ubound_per_batch: 60000
+  use_covariance_matrix: true
+  property_use_pair_injection: true
+  predictor_hidden_size: 128
+  predictor_layers: 1
+  predictor_mlp_hidden: 64
+  predictor_use_attn_pool: false
+  predictor_use_pair_stats: false
+  scheduler: plateau
+  plateau_factor: 0.6
+  plateau_patience: 3
+  plateau_min_lr: 5.0e-06
+  early_stop_patience: 10
+  save_topk: 1
+  separate_property_models: true
+  per_property_hidden_size: 128
+  per_property_layers: 1
+  per_property_mlp_hidden: 64

@@ -1,5 +1,10 @@
-#!/usr/bin/python
-# -*- coding:utf-8 -*-
+"""Historical model exports without an APCyc import cycle."""
 from .autoencoder.model import AutoEncoder
 from .LDM.ldm import LDMPepDesign
-from apcyc.model import APCycLDMPepDesign
+
+
+def __getattr__(name):
+    if name == 'APCycLDMPepDesign':
+        from apcyc.model import APCycLDMPepDesign
+        return APCycLDMPepDesign
+    raise AttributeError(name)

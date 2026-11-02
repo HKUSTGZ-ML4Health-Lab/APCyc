@@ -72,9 +72,7 @@ class ContinuousTransition(nn.Module):
         return p_noisy, supervise_e_rand
 
     def denoise(self, p_t, eps_p, mask_generate, batch_ids, t, guidance=None, guidance_weight=1.0):
-        # IMPORTANT:
-        #   clampping alpha is to fix the instability issue at the first step (t=T)
-        #   it seems like a problem with the ``improved ddpm''.
+        # Bound the inverse alpha scale at the terminal noisy step.
         expand_shape = [p_t.shape[0]] + [1 for _ in p_t.shape[1:]]
         mask_generate = mask_generate.view(*expand_shape)
 
@@ -96,22 +94,16 @@ class ContinuousTransition(nn.Module):
         if guidance is not None:
             eps_p = eps_p - torch.sqrt(1 - alpha_bar).view(*expand_shape) * guidance
 
-        # if guidance is not None:
-        #     p_next = c0 * (p_t - c1 * eps_p) + sigma * z + sigma * sigma * guidance_weight * guidance
-        # else:
-        #     p_next = c0 * (p_t - c1 * eps_p) + sigma * z
         p_next = c0 * (p_t - c1 * eps_p) + sigma * z
         p_next = torch.where(mask_generate.expand_as(p_t), p_next, p_t)
         return p_next
 
 
-# TODO: flow matching (uniform or OT), not done yet
 class FlowMatchingTransition(nn.Module):
 
     def __init__(self, num_steps, opt={}):
         super().__init__()
         self.num_steps = num_steps
-        # TODO: number of steps T or T + 1
         c1 = torch.arange(0, num_steps + 1).float() / num_steps
         c0 = 1 - c1
         self.register_buffer('c0', c0)
@@ -142,9 +134,7 @@ class FlowMatchingTransition(nn.Module):
         return p_noisy, (e_rand - p_0)
 
     def denoise(self, p_t, eps_p, mask_generate, batch_ids, t):
-        # IMPORTANT:
-        #   clampping alpha is to fix the instability issue at the first step (t=T)
-        #   it seems like a problem with the ``improved ddpm''.
+        # Euler step with fixed conditioning coordinates.
         expand_shape = [p_t.shape[0]] + [1 for _ in p_t.shape[1:]]
         mask_generate = mask_generate.view(*expand_shape)
 

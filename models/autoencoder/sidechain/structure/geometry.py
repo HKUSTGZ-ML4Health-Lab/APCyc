@@ -14,7 +14,7 @@
 
 """Layers for measuring and building atomic geometries in proteins.
 
-This module contains pytorch layers for computing common geometric features of 
+This module contains pytorch layers for computing common geometric features of
 protein backbones in a differentiable way and for converting between internal
 and Cartesian coordinate representations.
 """

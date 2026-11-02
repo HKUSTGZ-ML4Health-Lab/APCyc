@@ -1,6 +1,6 @@
 from typing import Callable
 from tqdm import tqdm
-from math import log
+import math
 
 import numpy as np
 import torch
@@ -19,29 +19,30 @@ class MixDatasetWrapper(torch.utils.data.Dataset):
             self.total_len += len(dataset)
             self.cum_len.append(self.total_len)
         self.collate_fn = self.datasets[0].collate_fn if collate_fn is None else collate_fn
-        if hasattr(datasets[0], '_lengths'):
-            self._lengths = []
-            for dataset in datasets:
-                self._lengths.extend(dataset._lengths)
-    
+
     def update_epoch(self):
         for dataset in self.datasets:
             if hasattr(dataset, 'update_epoch'):
                 dataset.update_epoch()
 
     def get_len(self, idx):
-        return self._lengths[idx]
+        previous = 0
+        for dataset, end in zip(self.datasets, self.cum_len):
+            if idx < end:
+                return dataset.get_len(idx - previous)
+            previous = end
+        raise IndexError(idx)
 
     def __len__(self):
         return self.total_len
-    
+
     def __getitem__(self, idx):
         last_cum_len = 0
         for i, cum_len in enumerate(self.cum_len):
             if idx < cum_len:
                 return self.datasets[i].__getitem__(idx - last_cum_len)
             last_cum_len = cum_len
-        return None # this is not possible
+        raise IndexError(idx)
 
     def get_type(self, idx):
         last_cum_len = 0
@@ -73,6 +74,8 @@ class DynamicBatchWrapper(torch.utils.data.Dataset):
         self.indexes = list(self.base_indexes)
         self.complexity = complexity
         self.eval_func = sympy.lambdify('n', sympy.simplify(complexity))
+        if not math.isfinite(ubound_per_batch) or ubound_per_batch <= 0:
+            raise ValueError('ubound_per_batch must be finite and positive.')
         self.ubound_per_batch = ubound_per_batch
         self.type_balanced = type_balanced
         self.type_target = type_target or {}
@@ -82,7 +85,6 @@ class DynamicBatchWrapper(torch.utils.data.Dataset):
         self._type_index_map = None
         if self.type_balanced:
             self._build_type_index_map()
-        self.total_size = None
         self.batch_indexes = []
         self._form_batch()
 
@@ -103,34 +105,26 @@ class DynamicBatchWrapper(torch.utils.data.Dataset):
     ########## overload with your criterion ##########
     def _form_batch(self):
         self.indexes = self._get_epoch_indexes()
-        np.random.shuffle(self.indexes)
-        last_batch_indexes = self.batch_indexes
+        np.random.RandomState(self.type_seed + self._epoch).shuffle(self.indexes)
         self.batch_indexes = []
 
         cur_complexity = 0
         batch = []
 
         for i in tqdm(self.indexes):
-            item_len = self.eval_func(self.dataset.get_len(i))
+            item_len = float(self.eval_func(self.dataset.get_len(i)))
+            if not math.isfinite(item_len) or item_len <= 0:
+                raise ValueError(f'Invalid batch complexity for sample {i}: {item_len}')
             if item_len > self.ubound_per_batch:
-                continue
+                raise ValueError(f'Sample {i} complexity {item_len} exceeds ubound_per_batch={self.ubound_per_batch}.')
             cur_complexity += item_len
             if cur_complexity > self.ubound_per_batch:
                 self.batch_indexes.append(batch)
                 batch = []
                 cur_complexity = item_len
             batch.append(i)
-        self.batch_indexes.append(batch)
-
-        if self.total_size is None:
-            self.total_size = len(self.batch_indexes)
-        else:
-            # control the lengths of the dataset, otherwise the dataloader will raise error
-            if len(self.batch_indexes) < self.total_size:
-                num_add = self.total_size - len(self.batch_indexes)
-                self.batch_indexes = self.batch_indexes + last_batch_indexes[:num_add]
-            else:
-                self.batch_indexes = self.batch_indexes[:self.total_size]
+        if batch:
+            self.batch_indexes.append(batch)
 
     def _build_type_index_map(self):
         if not hasattr(self.dataset, 'get_type'):
@@ -186,12 +180,28 @@ class DynamicBatchWrapper(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.batch_indexes)
-    
+
     def __getitem__(self, idx):
         return [self.dataset[i] for i in self.batch_indexes[idx]]
-    
+
     def collate_fn(self, batched_batch):
         batch = []
         for minibatch in batched_batch:
             batch.extend(minibatch)
         return self.dataset.collate_fn(batch)
+
+
+class EpochDistributedSampler(torch.utils.data.distributed.DistributedSampler):
+    """Refresh partition sizes when dynamic packing changes between epochs."""
+    def _refresh_sizes(self):
+        count = len(self.dataset)
+        self.num_samples = count // self.num_replicas if self.drop_last else (count + self.num_replicas - 1) // self.num_replicas
+        self.total_size = self.num_samples * self.num_replicas
+
+    def __iter__(self):
+        self._refresh_sizes()
+        return super().__iter__()
+
+    def __len__(self):
+        self._refresh_sizes()
+        return self.num_samples

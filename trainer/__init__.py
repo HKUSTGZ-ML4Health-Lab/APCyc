@@ -13,5 +13,3 @@ def create_trainer(config, model, train_loader, valid_loader):
         train_loader=train_loader,
         valid_loader=valid_loader,
         save_config=config)
-
-

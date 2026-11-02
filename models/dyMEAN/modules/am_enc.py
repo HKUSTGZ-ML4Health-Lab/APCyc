@@ -52,7 +52,7 @@ class AMEncoder(nn.Module):
             self.hidden_nf, self.hidden_nf, self.hidden_nf, n_channel, channel_nf,
             radial_nf, edges_in_d=in_edge_nf, act_fn=act_fn, residual=residual
         )
-    
+
     def forward(self, h, x, ctx_edges, inter_mask, inter_x, inter_edges, update_mask, inter_update_mask, channel_attr, channel_weights,
                 ctx_edge_attr=None):
         h = self.linear_in(h)

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from typing import Iterable, Optional, Sequence, Tuple
+import math
+from numbers import Integral, Real
 
 import torch
 import torch.nn as nn
@@ -17,17 +19,61 @@ def parse_guidance_w(w: Optional[Iterable[float]], k: int, device: torch.device)
     if w is None:
         return torch.ones(k, device=device)
     if isinstance(w, torch.Tensor):
-        return w.to(device=device, dtype=torch.float)
-    w_list = list(w)
-    if len(w_list) != k:
-        raise ValueError(f'guidance_w length {len(w_list)} != k={k}')
-    return torch.tensor(w_list, device=device, dtype=torch.float)
+        weights = w.to(device=device, dtype=torch.float)
+    else:
+        weights = torch.tensor(list(w), device=device, dtype=torch.float)
+    if weights.ndim != 1 or weights.numel() != k or not torch.isfinite(weights).all():
+        raise ValueError(f'guidance_w must contain exactly {k} finite values.')
+    return weights
+
+
+def predictor_keys(predictor):
+    keys = getattr(predictor, 'property_keys', None)
+    if (not isinstance(keys, (list, tuple)) or len(keys) != predictor.n_properties
+            or not all(isinstance(key, str) and key.strip() for key in keys) or len(keys) != len(set(keys))):
+        raise ValueError('Property checkpoint requires unique target names matching its output dimension.')
+    return list(keys)
+
+
+def weights_from_map(predictor, weights):
+    keys = predictor_keys(predictor)
+    if not isinstance(weights, dict) or set(weights) != set(keys):
+        raise ValueError(f'guidance_w_map must specify exactly the checkpoint targets: {keys}')
+    return [weights[key] for key in keys]
 
 
 def clip_guidance_w(w: torch.Tensor, w_min: Optional[float], w_max: Optional[float]) -> torch.Tensor:
     if w_min is None and w_max is None:
         return w
     return torch.clamp(w, min=w_min, max=w_max)
+
+
+def validate_guidance_options(options, num_steps=None):
+    """Reject enabled guidance that is nonfinite or has no effective update step."""
+    def finite(name, default, positive=False):
+        value = options.get(name, default)
+        if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value):
+            raise ValueError(f'{name} must be finite.')
+        if positive and value <= 0:
+            raise ValueError(f'{name} must be positive.')
+        return value
+    strength = finite('lambda_max', 0., positive=True)
+    finite('guidance_grad_norm_eps', 1e-6, positive=True)
+    start, end = options.get('t_guidance_start', 0), options.get('t_guidance_end', 0)
+    if (isinstance(start, bool) or isinstance(end, bool) or not isinstance(start, Integral)
+            or not isinstance(end, Integral) or not 0 <= end <= start or start < 2):
+        raise ValueError('Guidance times require integer 0 <= end <= start and start >= 2.')
+    if num_steps is not None and start > num_steps:
+        raise ValueError('t_guidance_start exceeds the generator diffusion steps.')
+    if guidance_lambda(2, start, end, strength) <= 0:
+        raise ValueError('Guidance schedule has no nonzero posterior-variance update step.')
+    if options.get('guidance_grad_norm_ref', 'mean') not in {'mean', 'median'}:
+        raise ValueError('guidance_grad_norm_ref must be mean or median.')
+    bounds = [options.get('guidance_w_min'), options.get('guidance_w_max')]
+    for name, value in zip(['guidance_w_min', 'guidance_w_max'], bounds):
+        if value is not None:finite(name, None)
+    if all(v is not None for v in bounds) and bounds[0] > bounds[1]:
+        raise ValueError('guidance_w_min must not exceed guidance_w_max.')
 
 
 def guidance_lambda(t: int, start: int, end: int, lambda_max: float) -> float:
@@ -42,7 +88,8 @@ def guidance_lambda(t: int, start: int, end: int, lambda_max: float) -> float:
 
 
 def sigma2_from_transition(trans, t: int, batch_ids: torch.Tensor, expand_shape: Tuple[int, ...]) -> torch.Tensor:
-    sigma = trans.var_sched.sigmas[t][batch_ids].view(*expand_shape)
+    # In inference t is a scalar shared by all graphs, unlike the vector t used in training.
+    sigma = trans.var_sched.sigmas[t].expand(batch_ids.numel()).reshape(*expand_shape)
     return sigma * sigma
 
 
@@ -88,36 +135,59 @@ class MultiPropertyPredictor(nn.Module):
 
 
 def load_property_predictor(ckpt_path: str, device: torch.device):
-    ckpt = torch.load(ckpt_path, map_location='cpu')
+    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=True)
     state_dict = ckpt['state_dict'] if isinstance(ckpt, dict) and 'state_dict' in ckpt else ckpt
     cfg = ckpt.get('model_cfg', {}) if isinstance(ckpt, dict) else {}
     from apcyc.property_predictor import PropertyPredictor
-    predictor = PropertyPredictor(**cfg)
-    predictor.load_state_dict(state_dict, strict=False)
+    with torch.random.fork_rng(devices=[]):
+        predictor = PropertyPredictor(**cfg)
+        predictor.load_state_dict(state_dict, strict=True)
     if isinstance(ckpt, dict):
         if 'property_mean' in ckpt and 'property_std' in ckpt:
             predictor.property_mean = torch.tensor(ckpt['property_mean'])
             predictor.property_std = torch.tensor(ckpt['property_std'])
+        predictor.feature_signature = ckpt.get('feature_signature')
         if 'property_keys' in ckpt:
             predictor.property_keys = list(ckpt['property_keys'])
     predictor.to(device)
     predictor.eval()
+    predictor_keys(predictor)
     return predictor
 
 
 def load_property_predictors(ckpt_paths, device: torch.device, keys: Optional[Sequence[str]] = None):
     predictors = [load_property_predictor(path, device) for path in ckpt_paths]
-    resolved_keys = None
-    if keys is not None:
-        resolved_keys = list(keys)
-    else:
-        collected = []
-        for pred in predictors:
-            pred_keys = getattr(pred, 'property_keys', None)
-            collected.append(pred_keys[0] if pred_keys else None)
-        if any(k is not None for k in collected):
-            resolved_keys = collected
+    if not predictors or any(pred.n_properties != 1 for pred in predictors):
+        raise ValueError('Multiple checkpoint paths require one target per property head.')
+    resolved_keys = [predictor_keys(pred)[0] for pred in predictors]
+    if len(resolved_keys) != len(set(resolved_keys)):
+        raise ValueError('Property heads must predict distinct targets.')
+    if keys is not None and list(keys) != resolved_keys:
+        raise ValueError('Configured property names differ from the checkpoint targets.')
     wrapper = MultiPropertyPredictor(predictors, keys=resolved_keys)
     wrapper.to(device)
     wrapper.eval()
     return wrapper
+
+
+def validate_property_compatibility(predictor, diffusion, generator_sha256, t_hard=10):
+    """Reject heads whose frozen input representation cannot be established."""
+    heads = list(predictor.predictors) if isinstance(predictor, MultiPropertyPredictor) else [predictor]
+    expected = diffusion.dist_rbf_dim + diffusion.pair_edge_dim
+    for head in heads:
+        predictor_keys(head)
+        if head.edge_size != expected:
+            raise ValueError(
+                f'Incompatible property checkpoint: head expects {head.edge_size} edge features, '
+                f'generator supplies {expected}. No padding or feature substitution is performed. '
+                'See docs/INFERENCE.md#property-guidance.'
+            )
+        signature = getattr(head, 'feature_signature', None)
+        if not isinstance(signature, dict) or signature.get('generator_bundle_sha256') != generator_sha256:
+            raise ValueError('Property checkpoint lacks a matching generator/feature-extractor fingerprint. '
+                             'See docs/INFERENCE.md#property-guidance; dimensions alone do not establish compatibility.')
+        from apcyc.property_features import feature_signature
+        if signature != feature_signature(generator_sha256, t_hard):
+            raise ValueError('Property feature contract, implementation or t_hard differs from training.')
+        if signature.get('pair_features') != 'generator' or signature.get('context_features') != 'generator':
+            raise ValueError('This property head was not exported for generator pair/context features.')

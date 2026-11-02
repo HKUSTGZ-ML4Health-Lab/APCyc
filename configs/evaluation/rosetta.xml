@@ -1,0 +1,12 @@
+<ROSETTASCRIPTS>
+    <SCOREFXNS>
+        <ScoreFunction name="score" weights="ref2015"/>
+    </SCOREFXNS>
+    <FILTERS>
+        <Ddg name="dg" threshold="-25" jump="1" repeats="1" repack="0" confidence="0" scorefxn="score"/>
+    </FILTERS>
+    <PROTOCOLS>
+        <Add filter="dg"/>
+    </PROTOCOLS>
+    <OUTPUT scorefxn="score"/>
+</ROSETTASCRIPTS>

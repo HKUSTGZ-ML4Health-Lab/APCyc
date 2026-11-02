@@ -220,6 +220,3 @@ class RadialBasis(torch.nn.Module):
     def forward(self, d):
         d_scaled = d * self.inv_cutoff
         return self.rbf(d_scaled) # the default gaussian should not use cutoff envelope
-
-        env = self.envelope(d_scaled)
-        return env[:, None] * self.rbf(d_scaled)  # (nEdges, num_radial)

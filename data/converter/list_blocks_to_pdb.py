@@ -19,7 +19,7 @@ def list_blocks_to_pdb(list_blocks: List[List[Block]], chain_names: List[str], o
     '''
         Convert pdb file to a list of lists of blocks using Biopython.
         Each chain will be a list of blocks.
-        
+
         Parameters:
             list_blocks: A list of lists of blocks. Each list of blocks will be parsed into one chain in the pdb
             chain_names: name of chains
@@ -41,14 +41,14 @@ def list_blocks_to_pdb(list_blocks: List[List[Block]], chain_names: List[str], o
 
 
 def _block_to_biopython(block: Block, pos_code: int) -> BResidue:
-    _id = (' ', pos_code, ' ')
+    _id = (' ', int(block.id[0]), block.id[1] or ' ') if block.id is not None else (' ', pos_code + 1, ' ')
     residue = BResidue(_id, block.abrv, '    ')
     for i, atom in enumerate(block):
         fullname = ' ' + atom.name
         while len(fullname) < 4:
             fullname += ' '
         bio_atom = BAtom(
-            name=atom,
+            name=atom.name,
             coord=np.array(atom.coordinate, dtype=np.float32),
             bfactor=0,
             occupancy=1.0,

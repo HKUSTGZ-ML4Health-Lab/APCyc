@@ -87,7 +87,10 @@ class AutoEncoder(nn.Module):
             enable_latent_anchor_channels=False,
             latent_anchor_atoms=None,
             latent_anchor_pad_atom='CA',
-            latent_anchor_strict=False
+            latent_anchor_strict=False,
+            loss_mode='legacy',
+            physical_loss_weight=1.0,
+            z_anchor_weight=0.01
         ) -> None:
         super().__init__()
         self.mask_id = mask_id
@@ -100,6 +103,11 @@ class AutoEncoder(nn.Module):
         self.z_kl_weight = z_kl_weight
         self.coord_loss_weights = coord_loss_weights
         self.coord_loss_ratio = coord_loss_ratio
+        if loss_mode not in {'legacy', 'paper'}:
+            raise ValueError('Unknown autoencoder loss_mode')
+        self.loss_mode = loss_mode
+        self.physical_loss_weight = physical_loss_weight
+        self.z_anchor_weight = z_anchor_weight
         self.mode = mode
         self.latent_size = 0 if self.mode == 'fixseq' else latent_size
         self.latent_n_channel = 0 if self.mode == 'fixbb' else latent_n_channel
@@ -116,7 +124,7 @@ class AutoEncoder(nn.Module):
         if self.anchor_at_ca: assert self.latent_n_channel == 1, f'Specifying anchor_at_ca as True but number of latent channels is not 1'
         if self.mode == 'fixseq': assert self.coord_loss_ratio == 1.0, f'Specifying fixseq mode but coordination loss ratio is not 1.0: {self.coord_loss_ratio}'
         if self.mode == 'fixbb': assert self.coord_loss_ratio == 0.0, f'Specifying fixbb mode but coordination loss ratio is not 0.0: {self.coord_loss_ratio}'
-        
+
         atom_embed_size = embed_size // 4
         self.aa_feature = SeparatedAminoAcidFeature(
             embed_size, atom_embed_size,
@@ -125,7 +133,7 @@ class AutoEncoder(nn.Module):
             fix_atom_weights=True
         )
         self.protein_feature = ProteinFeature()
-        
+
         self.encoder = create_encoder(
             name = encoder,
             atom_embed_size = atom_embed_size,
@@ -137,7 +145,7 @@ class AutoEncoder(nn.Module):
             n_rbf = n_rbf,
             cutoff = cutoff
         )
-        
+
         if self.mode != 'fixbb':
             self.sidechain_decoder = create_encoder(
                 name = encoder,
@@ -153,11 +161,10 @@ class AutoEncoder(nn.Module):
             self.backbone_model = BackboneModel()
             self.sidechain_model = SideChainModel()
             self.W_Z_log_var = nn.Linear(hidden_size, latent_n_channel * 3)
-        
+
         if self.mode != 'fixseq':
             self.W_mean = nn.Linear(hidden_size, latent_size)
             self.W_log_var = nn.Linear(hidden_size, latent_size)
-            # self.hidden2latent = nn.Linear(hidden_size, latent_size)
             self.latent2hidden = nn.Linear(latent_size, hidden_size)
             self.merge_S_H = nn.Linear(hidden_size * 2, hidden_size)
 
@@ -175,7 +182,7 @@ class AutoEncoder(nn.Module):
                     n_rbf = n_rbf,
                     cutoff = cutoff
                 )
-        
+
         # residue type index mapping, from original index to trainable classes, 0 is unk
         self.unk_idx = 0
         if self.enable_enlarged_vocab:
@@ -194,7 +201,7 @@ class AutoEncoder(nn.Module):
                 self.s_remap[i + 1] =  original_idx
         self.s_map = nn.Parameter(torch.tensor(self.s_map, dtype=torch.long), requires_grad=False)
         self.s_remap = nn.Parameter(torch.tensor(self.s_remap, dtype=torch.long), requires_grad=False)
-        
+
         if self.mode != 'fixseq':
             self.seq_linear = nn.Linear(hidden_size, len(self.s_remap))
 
@@ -203,8 +210,8 @@ class AutoEncoder(nn.Module):
         self.anchor_pad_latent_idx = None
         if self.enable_latent_anchor_channels:
             self._build_anchor_channel_map()
-        
-    
+
+
     @torch.no_grad()
     def prepare_inputs(self, X, S, mask, atom_mask, lengths):
 
@@ -225,7 +232,7 @@ class AutoEncoder(nn.Module):
         inter_edges = torch.stack([row[is_inter], col[is_inter]], dim=0) # [2, Ei]
 
         return ctx_edges, inter_edges, batch_ids
-    
+
     @torch.no_grad()
     def get_batch_ids(self, S, lengths):
         batch_ids = torch.zeros_like(S)
@@ -286,7 +293,7 @@ class AutoEncoder(nn.Module):
             return self._get_anchor_latent_channels(X, atom_mask, S)
         else:
             return self._get_latent_channels(X, atom_mask, S)
-        
+
     def _fill_latent_channels(self, latent_X, S=None):
         if self.enable_latent_anchor_channels:
             return self._fill_anchor_latent_channels(latent_X, S)
@@ -418,7 +425,7 @@ class AutoEncoder(nn.Module):
             if valid.any():
                 X_full[rows[valid], idx[valid]] = latent_X[rows[valid], k]
         return X_full
-        
+
     def _remove_sidechain_atom_mask(self, atom_mask, mask_generate):
         atom_mask = atom_mask.clone()
         bb_mask = atom_mask[mask_generate]
@@ -464,8 +471,8 @@ class AutoEncoder(nn.Module):
         # resample
         latent_H, latent_X, H_kl_loss, X_kl_loss = self.rsample(H, Z, Z_centers, no_randomness)
         return latent_H, latent_X, H_kl_loss, X_kl_loss
-    
-    def decode(self, X, S, H, Z, mask, position_ids, lengths, atom_mask, teacher_forcing):
+
+    def decode(self, X, S, H, Z, mask, position_ids, lengths, atom_mask, teacher_forcing, allow_unk=True):
         X, S, atom_mask = X.clone(), S.clone(), atom_mask.clone()
         true_S = S[mask].clone()
         if self.mode != 'fixbb':  # fill coordinates with latent points
@@ -497,6 +504,9 @@ class AutoEncoder(nn.Module):
             H_0[mask] = H_from_latent  # TODO: how about the position encoding
             H, _ = self.seq_decoder(H_0, X, edges, channel_attr=atom_embeddings, channel_weights=atom_mask.float())
             pred_S_logits = self.seq_linear(H[mask])  # [Ntgt, 21]
+            if not allow_unk:
+                pred_S_logits = pred_S_logits.clone()
+                pred_S_logits[:, self.unk_idx] = float('-inf')
             S = S.clone()
             if teacher_forcing:  # teacher forcing
                 S[mask] = true_S
@@ -524,14 +534,14 @@ class AutoEncoder(nn.Module):
     @oom_decorator
     def forward(self, X, S, mask, position_ids, lengths, atom_mask, teacher_forcing=True):
         true_X, true_S = X[mask].clone(), S[mask].clone()
-        
+
         # encode: H (N*d), Z (N*3)
         if self.mask_ratio > 0:
             input_S, input_atom_mask = self._mask_pep(S, atom_mask, mask)
         else:
             input_S, input_atom_mask = S, atom_mask
         H, Z, H_kl_loss, Z_kl_loss = self.encode(X, input_S, mask, position_ids, lengths, input_atom_mask)
-        
+
         if self.mode != 'fixbb':
             coord_reg_loss = F.mse_loss(Z, self._get_latent_channel_anchors(true_X, atom_mask[mask], true_S))
         else:
@@ -581,11 +591,18 @@ class AutoEncoder(nn.Module):
         else:
             struct_recon_loss, loss_profile = 0, {}
 
-        recon_loss = (1 - self.coord_loss_ratio) * (seq_recon_loss + self.h_kl_weight * H_kl_loss) + \
-                     self.coord_loss_ratio * (struct_recon_loss + self.z_kl_weight * Z_kl_loss)
-
+        if self.loss_mode == 'paper':
+            # Paper Appendix B: CE + coordinate MSE + gamma*physical + KL(H)
+            # + eta*distance-to-CA. The old Gaussian coordinate KL is not Eq. 25.
+            coordinate_mse = loss_profile.get('Xloss', 0)
+            physical = struct_recon_loss - self.coord_loss_weights.get('Xloss', 1) * coordinate_mse
+            recon_loss = (seq_recon_loss + coordinate_mse + self.physical_loss_weight * physical
+                          + H_kl_loss + self.z_anchor_weight * coord_reg_loss)
+        else:
+            recon_loss = (1 - self.coord_loss_ratio) * (seq_recon_loss + self.h_kl_weight * H_kl_loss) + \
+                         self.coord_loss_ratio * (struct_recon_loss + self.z_kl_weight * Z_kl_loss)
         return recon_loss, (seq_recon_loss, aar), (struct_recon_loss, loss_profile), (H_kl_loss, Z_kl_loss, coord_reg_loss)
-    
+
     def _reconstruct(self, X, S, mask, position_ids, lengths, atom_mask, given_laten_H=None, given_latent_X=None, allow_unk=False, optimize_sidechain=True, idealize=False, no_randomness=False):
         if given_laten_H is None and given_latent_X is None:
             # encode: H (N*d), Z (N*3)
@@ -595,9 +612,10 @@ class AutoEncoder(nn.Module):
             H, Z = given_laten_H, given_latent_X
 
         # decode: S (N), Z (N * 14 * 3) with atom mask
-        recon_S_logits, recon_X = self.decode(X, S, H, Z, mask, position_ids, lengths, atom_mask, teacher_forcing=False)
+        recon_S_logits, recon_X = self.decode(X, S, H, Z, mask, position_ids, lengths, atom_mask,
+                                             teacher_forcing=False, allow_unk=allow_unk)
         batch_ids = self.get_batch_ids(S, lengths)[mask]
-        
+
         if self.mode != 'fixseq':
             if not allow_unk:
                 recon_S_logits[:, 0] = float('-inf')
@@ -616,7 +634,7 @@ class AutoEncoder(nn.Module):
             recon_X = self.backbone_model(recon_X, batch_ids)
             # rectify sidechain
             recon_X = self.sidechain_model(recon_X, recon_S, batch_ids, optimize_sidechain)
-        
+
         return recon_X, recon_S, batch_ppls, batch_ids
 
     @torch.no_grad()
@@ -631,7 +649,7 @@ class AutoEncoder(nn.Module):
             if self.mode != 'fixseq':
                 S[mask] = recon_S
             given_laten_H, given_latent_X = None, None # let the model encode and decode for later iterations
-        
+
         if return_tensor:
             return recon_X, recon_S, batch_ppls
 
@@ -646,6 +664,6 @@ class AutoEncoder(nn.Module):
             if self.mode == 'fixseq':
                 batch_S.append(None)
             else:
-                batch_S.append(''.join([VOCAB.idx_to_symbol(s) for s in recon_S[cur_mask]]))
+                batch_S.append([VOCAB.idx_to_symbol(s) for s in recon_S[cur_mask]])
 
         return batch_X, batch_S, batch_ppls

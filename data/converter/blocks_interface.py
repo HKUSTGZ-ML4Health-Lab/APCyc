@@ -10,12 +10,12 @@ def blocks_to_coords(blocks):
         coords.append([unit.get_coord() for unit in block.units])
         max_n_unit = max(max_n_unit, len(coords[-1]))
         masks.append([1 for _ in coords[-1]])
-    
+
     for i in range(len(coords)):
         num_pad =  max_n_unit - len(coords[i])
         coords[i] = coords[i] + [[0, 0, 0] for _ in range(num_pad)]
         masks[i] = masks[i] + [0 for _ in range(num_pad)]
-    
+
     return np.array(coords), np.array(masks).astype('bool')  # [N, M, 3], [N, M], M == max_n_unit, in mask 0 is for padding
 
 
@@ -36,7 +36,7 @@ def dist_matrix_from_blocks(blocks1, blocks2):
 
 def blocks_interface(blocks1, blocks2, dist_th):
     dist = dist_matrix_from_blocks(blocks1, blocks2)
-    
+
     on_interface = dist < dist_th
     indexes1 = np.nonzero(on_interface.sum(axis=1) > 0)[0]
     indexes2 = np.nonzero(on_interface.sum(axis=0) > 0)[0]
@@ -78,7 +78,7 @@ def blocks_cb_interface(blocks1, blocks2, dist_th=8.0):
     cb_coords1 = blocks_to_cb_coords(blocks1)
     cb_coords2 = blocks_to_cb_coords(blocks2)
     dist = np.linalg.norm(cb_coords1[:, None] - cb_coords2[None, :], axis=-1)  # [N1, N2]
-    
+
     on_interface = dist < dist_th
     indexes1 = np.nonzero(on_interface.sum(axis=1) > 0)[0]
     indexes2 = np.nonzero(on_interface.sum(axis=0) > 0)[0]

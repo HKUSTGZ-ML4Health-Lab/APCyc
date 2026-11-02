@@ -1,0 +1,76 @@
+# Paper-method defaults. Requires matching paper-profile AE/LDM.
+cyc_enhance:
+  enable_enlarged_vocab: true
+  vocab_custom_map: null
+  vocab_mode: paper
+dataloader:
+  batch_size_scope: per_device
+  batch_size: 1
+  num_workers: 4
+  shuffle: true
+  val_batch_size: 1
+  wrapper:
+    class: DynamicBatchWrapper
+    complexity: n**2
+    ubound_per_batch: 60000
+dataset:
+  train:
+    backbone_only: false
+    class: CPCoreMMapDataset
+    jsonl_path: /path/to/data/cpcore/metadata.jsonl
+    mmap_dir: /path/to/data/cpcore/mmap
+    return_sample_id: false
+    return_supervision: false
+    specify_index: /path/to/data/cpcore/mmap/train_index.txt
+  valid:
+    backbone_only: false
+    class: CPCoreMMapDataset
+    jsonl_path: /path/to/data/cpcore/metadata.jsonl
+    mmap_dir: /path/to/data/cpcore/mmap
+    return_sample_id: false
+    return_supervision: false
+    specify_index: /path/to/data/cpcore/mmap/valid_index.txt
+model:
+  anchor_at_ca: true
+  class: AutoEncoder
+  coord_loss_weights:
+    Xloss: 1.0
+    bb_bond_lengths_loss: 1.0
+    bb_dihedral_angles_loss: 0.0
+    ca_Xloss: 1.0
+    sc_bond_lengths_loss: 1.0
+    sc_chi_angles_loss: 0.5
+  embed_size: 128
+  hidden_size: 128
+  latent_n_channel: 1
+  latent_size: 8
+  mask_ratio: 0.25
+  n_channel: 14
+  n_layers: 3
+  relative_position: false
+  enable_enlarged_vocab: true
+  loss_mode: paper
+  physical_loss_weight: 1.0
+  z_anchor_weight: 0.01
+trainer:
+  class: AutoEncoderTrainer
+  config:
+    grad_norm_every_n_steps: 100
+    max_epoch: 200
+    metric_min_better: true
+    optimizer:
+      class: AdamW
+      lr: 0.0001
+    patience: 10
+    save_dir: outputs/training/autoencoder
+    save_every_n_steps: 2000
+    save_topk: 5
+    scheduler:
+      class: ReduceLROnPlateau
+      factor: 0.8
+      frequency: val_epoch
+      min_lr: 5.0e-06
+      mode: min
+      patience: 5
+    throughput_every_n_steps: 100
+    val_every_n_steps: 1000

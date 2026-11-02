@@ -7,7 +7,6 @@ from typing import Optional
 import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data._utils.collate import default_collate
 
 from utils import register as R
 from utils.const import sidechain_atoms
@@ -30,6 +29,54 @@ def _normalize_icode(icode) -> str:
 def calculate_covariance_matrix(point_cloud):
     covariance_matrix = np.cov(point_cloud, rowvar=False)
     return covariance_matrix
+
+
+def _load_metadata(path):
+    records = {}
+    with open(path) as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if not isinstance(record, dict):
+                raise ValueError('Each metadata record must be an object.')
+            sid = record.get('sample_id')
+            if not isinstance(sid, str) or not sid.strip() or sid in records:
+                raise ValueError('Metadata sample IDs must be unique nonempty strings.')
+            records[sid] = record
+    return records
+
+
+def _validate_record(record, length, supervision):
+    declared = record.get('peptide_length', length)
+    if type(declared) is not int or declared != length or length < 1:
+        raise ValueError('Metadata peptide_length differs from the structure.')
+    if supervision or 'c_star' in record or 'gt_pair' in record:
+        pair = record.get('gt_pair')
+        if (not isinstance(record.get('c_star'), str) or record['c_star'] not in TYPE2IDX or not isinstance(pair, list)
+                or len(pair) != 2 or any(type(i) is not int or not 0 <= i < length for i in pair)
+                or pair[0] == pair[1]):
+            raise ValueError('Invalid cyclization supervision: require a known type and two distinct peptide-local sites.')
+
+
+def _collate_complexes(batch, padding_collate):
+    results = {}
+    for key in batch[0]:
+        values = [item[key] for item in batch]
+        if values[0] is None:
+            results[key] = None
+        elif key in ('lengths', 'c_star', 'peptide_length'):
+            results[key] = torch.tensor(values, dtype=torch.long)
+        elif key == 'sample_id':
+            results[key] = values
+        elif key == 'gt_pair':
+            results[key] = torch.stack(values, dim=0)
+        elif padding_collate:
+            padding = VOCAB.symbol_to_idx(VOCAB.PAD) if key == 'S' else 0
+            results[key] = pad_sequence(values, batch_first=True, padding_value=padding)
+        else:
+            results[key] = torch.cat(values, dim=0)
+    return results
 
 
 @R.register('CPCoreDataset')
@@ -75,20 +122,12 @@ class CPCoreDataset(torch.utils.data.Dataset):
         with open(index_path, 'r') as f:
             self.sample_ids = [line.strip() for line in f if line.strip()]
 
-        self.meta = {}
-        with open(jsonl_path, 'r') as f:
-            for line in f:
-                record = json.loads(line)
-                self.meta[record['sample_id']] = record
-        self._lengths = []
-        for sample_id in self.sample_ids:
-            record = self.meta.get(sample_id, {})
-            pep_len = int(record.get('peptide_length', 0)) if record is not None else 0
-            pocket_len = 0
-            if self.pocket_json_dir is not None:
-                pocket_set = self._load_pocket_set(sample_id)
-                pocket_len = len(pocket_set) if pocket_set is not None else 0
-            self._lengths.append(pep_len + pocket_len)
+        self.meta = _load_metadata(jsonl_path)
+        if len(self.sample_ids) != len(set(self.sample_ids)):
+            raise ValueError('Dataset index contains duplicate sample IDs.')
+        if set(self.sample_ids) - set(self.meta):
+            raise ValueError('Dataset index contains IDs missing from metadata.')
+        self._lengths = [None] * len(self.sample_ids)
 
     def _load_pocket_set(self, sample_id: str):
         if sample_id in self._pocket_cache:
@@ -133,6 +172,8 @@ class CPCoreDataset(torch.utils.data.Dataset):
         return len(self.sample_ids)
 
     def get_len(self, idx: int):
+        if self._lengths[idx] is None:
+            self._lengths[idx] = self[idx]['lengths']
         return self._lengths[idx]
 
     def get_type(self, idx: int):
@@ -153,6 +194,7 @@ class CPCoreDataset(torch.utils.data.Dataset):
         rec_blocks = [Block.from_tuple(tup.to_tuple()) if isinstance(tup, Block) else Block.from_tuple(tup) for tup in list_blocks[0]]
         lig_blocks = [Block.from_tuple(tup.to_tuple()) if isinstance(tup, Block) else Block.from_tuple(tup) for tup in list_blocks[1]]
 
+        _validate_record(record, len(lig_blocks), self.return_supervision)
         rec_position_ids = [i + 1 for i, _ in enumerate(rec_blocks)]
         pocket_set = self._load_pocket_set(sample_id)
         if pocket_set is not None:
@@ -211,6 +253,7 @@ class CPCoreDataset(torch.utils.data.Dataset):
         else:
             L = None
 
+        self._lengths[idx] = len(S)
         item = {
             'X': X,
             'S': torch.tensor(S, dtype=torch.long),
@@ -230,28 +273,7 @@ class CPCoreDataset(torch.utils.data.Dataset):
         return item
 
     def collate_fn(self, batch):
-        if self.padding_collate:
-            results = {}
-            pad_idx = VOCAB.symbol_to_idx(VOCAB.PAD)
-            for key in batch[0]:
-                values = [item[key] for item in batch]
-                if values[0] is None:
-                    results[key] = None
-                    continue
-                if key in ('lengths', 'c_star', 'peptide_length'):
-                    results[key] = torch.tensor(values, dtype=torch.long)
-                elif key == 'sample_id':
-                    results[key] = values
-                elif key == 'gt_pair':
-                    results[key] = torch.stack(values, dim=0)
-                elif key == 'S':
-                    results[key] = pad_sequence(values, batch_first=True, padding_value=pad_idx)
-                else:
-                    results[key] = pad_sequence(values, batch_first=True, padding_value=0)
-            return results
-        if len(batch) == 1:
-            return batch[0]
-        return default_collate(batch)
+        return _collate_complexes(batch, self.padding_collate)
 
 
 @R.register('CPCoreMMapDataset')
@@ -281,30 +303,35 @@ class CPCoreMMapDataset(MMAPDataset):
         self.enable_enlarged_vocab = enable_enlarged_vocab
         self.vocab_strict = vocab_strict
 
-        self.meta = {}
-        with open(jsonl_path, 'r') as f:
-            for line in f:
-                record = json.loads(line)
-                self.meta[record['sample_id']] = record
+        self.meta = _load_metadata(jsonl_path)
 
         self._lengths = [len(prop[-1].split(',')) + int(prop[1]) for prop in self._properties]
+
+    def get_sample_id(self, idx):
+        entry = self._indexes[idx][0]
+        if entry in self.meta:
+            return entry
+        if entry.endswith('.pdb') and entry[:-4] in self.meta:
+            return entry[:-4]
+        raise KeyError(f'Metadata missing for {entry}')
 
     def get_len(self, idx):
         return self._lengths[idx]
 
     def get_type(self, idx: int):
-        sample_id = self._indexes[idx][0].split('.')[0]
+        sample_id = self.get_sample_id(idx)
         record = self.meta.get(sample_id, {})
         return record.get('c_star', None)
 
     def __getitem__(self, idx: int):
         data = super().__getitem__(idx)
-        sample_id = self._indexes[idx][0].split('.')[0]
+        sample_id = self.get_sample_id(idx)
         if sample_id not in self.meta:
             raise KeyError(f'Metadata missing for {sample_id}')
         record = self.meta[sample_id]
 
         rec_blocks, lig_blocks = data
+        _validate_record(record, len(lig_blocks), self.return_supervision)
         pocket_idx = [int(i) for i in self._properties[idx][-1].split(',')]
         rec_position_ids = [i + 1 for i, _ in enumerate(rec_blocks)]
 
@@ -372,40 +399,4 @@ class CPCoreMMapDataset(MMAPDataset):
         return item
 
     def collate_fn(self, batch):
-        if self.padding_collate:
-            results = {}
-            pad_idx = VOCAB.symbol_to_idx(VOCAB.PAD)
-            for key in batch[0]:
-                values = [item[key] for item in batch]
-                if values[0] is None:
-                    results[key] = None
-                    continue
-                if key in ('lengths', 'c_star', 'peptide_length'):
-                    results[key] = torch.tensor(values, dtype=torch.long)
-                elif key == 'sample_id':
-                    results[key] = values
-                elif key == 'gt_pair':
-                    results[key] = torch.stack(values, dim=0)
-                elif key == 'S':
-                    results[key] = pad_sequence(values, batch_first=True, padding_value=pad_idx)
-                else:
-                    results[key] = pad_sequence(values, batch_first=True, padding_value=0)
-            return results
-        else:
-            results = {}
-            for key in batch[0]:
-                values = [item[key] for item in batch]
-                if values[0] is None:
-                    results[key] = None
-                    continue
-                if key == 'lengths':
-                    results[key] = torch.tensor(values, dtype=torch.long)
-                elif key in ('c_star', 'peptide_length'):
-                    results[key] = torch.tensor(values, dtype=torch.long)
-                elif key == 'sample_id':
-                    results[key] = values
-                elif key == 'gt_pair':
-                    results[key] = torch.stack(values, dim=0)
-                else:
-                    results[key] = torch.cat(values, dim=0)
-            return results
+        return _collate_complexes(batch, self.padding_collate)

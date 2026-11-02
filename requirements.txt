@@ -1,1 +1,14 @@
--r requirements/framework.txt
+# Python 3.12. Install matching CPU/CUDA wheels first; see docs/INSTALL.md.
+torch==2.5.1
+torch-scatter==2.1.2
+numpy==1.26.4
+scipy==1.14.1
+pandas==2.2.3
+biopython==1.85
+PyYAML==6.0.2
+tqdm==4.67.3
+sympy==1.13.1
+tensorboard==2.18.0
+rdkit==2024.9.6
+selenium>=4.20,<5
+webdriver-manager>=4,<5

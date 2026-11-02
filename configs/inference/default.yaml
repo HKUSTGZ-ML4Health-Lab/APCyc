@@ -1,0 +1,10 @@
+# Plain receptor-conditioned sampling.
+# Paths supplied on the CLI are relative to the current directory.
+# Property paths in a config are relative to the config file itself.
+sample_opt:
+  pbar: false
+  energy_func: null
+  energy_lambda: 0.0
+  autoencoder_n_iter: 1
+  t_hard: 10
+  use_cg_guidance: false

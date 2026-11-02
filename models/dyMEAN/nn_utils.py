@@ -45,7 +45,7 @@ class AminoAcidEmbedding(nn.Module):
         self.atom_pos_embedding = nn.Embedding(num_atom_pos, atom_embed_size)
         self.atom_pad_id = atom_pad_id
         self.eps = 1e-10  # for mean of atom embedding (some residues have no atom at all)
-    
+
     def forward(self, S, RP, A, AP):
         '''
         :param S: [N], residue types
@@ -77,7 +77,7 @@ class AminoAcidFeature(nn.Module):
         self.atom_pad_idx = VOCAB.get_atom_pad_idx()
         self.atom_pos_mask_idx = VOCAB.get_atom_pos_mask_idx()
         self.atom_pos_pad_idx = VOCAB.get_atom_pos_pad_idx()
-        
+
         self.mask_idx = VOCAB.get_mask_idx()
         self.unk_idx = VOCAB.symbol_to_idx(VOCAB.UNK)
         self.latent_idx = VOCAB.symbol_to_idx(VOCAB.LAT)
@@ -116,7 +116,7 @@ class AminoAcidFeature(nn.Module):
                 num_pad = n_channel - len(atom_type)
                 residue_atom_type.append(atom_type + [self.atom_pad_idx for _ in range(num_pad)])
                 residue_atom_pos.append(atom_pos + [self.atom_pos_pad_idx for _ in range(num_pad)])
-        
+
         # mapping from residue to atom types and positions
         self.residue_atom_type = nn.parameter.Parameter(
             torch.tensor(residue_atom_type, dtype=torch.long),
@@ -185,7 +185,7 @@ class AminoAcidFeature(nn.Module):
     def _construct_atom_type(self, S):
         # construct atom types
         return self.residue_atom_type[S]
-    
+
     def _construct_atom_pos(self, S):
         # construct atom positions
         return self.residue_atom_pos[S]
@@ -227,12 +227,12 @@ class SeparatedAminoAcidFeature(AminoAcidFeature):
         atom_weights[atom_weights_mask] = 0
         self.atom_weight = nn.parameter.Parameter(atom_weights, requires_grad=not fix_atom_weights)
         self.zero_atom_weight = nn.parameter.Parameter(torch.zeros_like(atom_weights), requires_grad=False)
-        
+
         self.aa_embedding = AminoAcidEmbedding(
             self.num_aa_type, self.num_atom_type, self.num_atom_pos,
             embed_size, atom_embed_size, self.atom_pad_idx,
             max_position, relative_position)
-    
+
     def get_atom_weights(self, residue_types):
         weights = torch.where(
             self.atom_weights_mask,
@@ -261,7 +261,7 @@ class SeparatedAminoAcidFeature(AminoAcidFeature):
         atom_embedding = self.aa_embedding.atom_embedding(atom_type) +\
                          self.aa_embedding.atom_pos_embedding(atom_pos)
         atom_weights = self.get_atom_weights(S)
-        
+
         return H, (atom_embedding, atom_weights)
 
 
@@ -355,9 +355,6 @@ class ProteinFeature:
         # # 2. bond angles (C_{n-1}-N, N-CA), (N-CA, CA-C), (CA-C, C=O), (CA-C, C-N_{n+1}), (O=C, C-Nn)
         # u_0, u_1 = U[:-1], U[1:]  # [N*3 - 2, 3]
         # cosA1 = ((-u_0) * u_1).sum(-1)  # [N*3 - 2], (C_{n-1}-N, N-CA), (N-CA, CA-C), (CA-C, C-N_{n+1})
-        # same_chain_mask = sequential_and(
-        #     seg_id_atom[:-2] == seg_id_atom[1:-1],
-        #     seg_id_atom[1:-1] == seg_id_atom[2:]
         # )
         # cosA1 = cosA1[same_chain_mask]  # [N*3 - 2 * num_chain]
         # u_co = F.normalize(ori_X[:, 3] - ori_X[:, 2], dim=-1)  # [N, 3], C=O
@@ -365,14 +362,12 @@ class ProteinFeature:
         # u_cn = U[2::3] # [N-1, 3], C-N_{n+1}
         # cosA2 = (u_co * u_cca).sum(-1)  # [N], (C=O, C-CA)
         # cosA3 = (u_co[:-1] * u_cn).sum(-1)  # [N-1], (C=O, C-N_{n+1})
-        # same_chain_mask = (seg_id[:-1] == seg_id[1:]) # [N-1]
         # cosA3 = cosA3[same_chain_mask]
         # cosA = torch.cat([cosA1, cosA2, cosA3], dim=-1)
         # cosA = torch.clamp(cosA, -1 + eps, 1 - eps)
 
-        # return cosD, cosA
         return cosD
-    
+
     def get_struct_profile(self, X, S, batch_ids, aa_feature: AminoAcidFeature, segment_ids=None, atom_mask=None):
         '''
             X: [N, 14, 3], coordinates of all atoms

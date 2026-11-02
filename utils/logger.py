@@ -26,7 +26,7 @@ def get_prio(level):
 def print_log(s, level='INFO', end='\n', no_prefix=False):
     #当前允许输出的最小等级
     pth_prio = get_prio(os.getenv('LOG', 'INFO'))
-    #当前日志的等级 
+    #当前日志的等级
     prio = get_prio(level)
 
     if prio >= pth_prio:

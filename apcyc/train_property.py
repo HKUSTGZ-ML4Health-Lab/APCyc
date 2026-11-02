@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
+import json
+from itertools import islice
+from pathlib import Path
 import os
 import sys
 from typing import Dict, List, Tuple
@@ -20,19 +24,18 @@ if ROOT_DIR not in sys.path:
 from utils.logger import print_log
 from utils.random_seed import setup_seed
 from apcyc.dataset import CPCoreDataset, CPCoreMMapDataset
-from apcyc.cyclic_injection import cyclic_lambda
 from apcyc.property_predictor import PropertyPredictor
-from apcyc.cyc_enhance import apply_enlarged_vocab, set_config
 from data.dataset_wrapper import DynamicBatchWrapper
 
 import yaml
-import models
-from utils import register as R
+from apcyc.property_schema import DEFAULT_PROPERTY_KEYS
 
 
-def parse():
-    parser = argparse.ArgumentParser(description='Train latent property predictor')
+def parse(argv=None):
+    parser = argparse.ArgumentParser(description='Train latent property predictor', allow_abbrev=False)
     parser.add_argument('--config', type=str, default=None, help='APCyc LDM config (recommended)')
+    parser.add_argument('--generator_bundle', help='Frozen generator bundle used by inference; required for training.')
+    parser.add_argument('--t_hard', type=int, default=10)
     parser.add_argument('--train_index', type=str, required=True)
     parser.add_argument('--valid_index', type=str, required=True)
     parser.add_argument('--pdb_dir', type=str, default=None)
@@ -47,7 +50,7 @@ def parse():
     parser.add_argument('--property_csv', type=str, default='merged_properties_scored.csv')
     parser.add_argument('--id_col', type=str, default='id')
     parser.add_argument('--property_keys', type=str, default=None)
-    parser.add_argument('--k_properties', type=int, default=7)
+    parser.add_argument('--k_properties', type=int, default=len(DEFAULT_PROPERTY_KEYS))
     parser.add_argument('--lambda_k', type=str, default=None)
     parser.add_argument('--pos_embed_size', type=int, default=4096)
     parser.add_argument('--gpus', type=int, default=0, help='GPU id to use, -1 for cpu')
@@ -68,7 +71,7 @@ def parse():
     parser.add_argument('--ubound_per_batch', type=int, default=60000)
     parser.add_argument('--val_batch_size', type=int, default=1)
     parser.add_argument('--val_full_batch', type=str, default='true')
-    parser.add_argument('--property_use_pair_injection', type=str, default='false')
+    parser.add_argument('--property_use_pair_injection', type=str, default='true')
     parser.add_argument('--scheduler', type=str, default='plateau')
     parser.add_argument('--plateau_factor', type=float, default=0.6)
     parser.add_argument('--plateau_patience', type=int, default=3)
@@ -81,12 +84,18 @@ def parse():
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--ckpt_out', type=str, default='./ckpts/property_predictor.pt')
     parser.add_argument('--seed', type=int, default=2021)
-    args = parser.parse_args()
-    defaults = {}
-    for action in parser._actions:
-        if action.dest != 'help':
-            defaults[action.dest] = action.default
-    args._defaults = defaults
+    parser.add_argument('--preflight-batches', type=int, default=0,
+                        help='Run bounded forward/backward and checkpoint checks, with zero optimizer updates.')
+    parser.add_argument('--preflight-out', type=str)
+    argv = sys.argv[1:] if argv is None else argv
+    args = parser.parse_args(argv)
+    if args.preflight_batches < 0 or (args.preflight_batches and not args.preflight_out):
+        parser.error('--preflight-batches must be positive and requires --preflight-out')
+    if args.preflight_batches and args.validate_only:
+        parser.error('--preflight-batches and --validate_only are mutually exclusive')
+    args._explicit_cli = {parser._option_string_actions[token.split('=', 1)[0]].dest
+                          for token in argv if token.split('=', 1)[0] in parser._option_string_actions}
+    args._config_types = {a.dest: a.type for a in parser._actions if a.dest != 'help'}
     return args
 
 
@@ -104,11 +113,16 @@ def _parse_bool(value: str) -> bool:
 
 
 def _apply_train_config(args, train_cfg: Dict) -> None:
-    defaults = getattr(args, '_defaults', {})
+    explicit = getattr(args, '_explicit_cli', set())
     for key, value in train_cfg.items():
-        if not hasattr(args, key):
-            continue
-        if key in defaults and getattr(args, key) == defaults[key]:
+        if key.startswith('_') or key in {'preflight_batches', 'preflight_out', 'validate_only'} or not hasattr(args, key):
+            raise ValueError(f'Unknown property_train option: {key}')
+        if key not in explicit:
+            convert = getattr(args, '_config_types', {}).get(key)
+            if key == 'property_keys' and isinstance(value, list):
+                value = ','.join(value)
+            elif convert is not None and value is not None:
+                value = convert(str(value))
             setattr(args, key, value)
 
 
@@ -116,7 +130,7 @@ def _dataset_sample_ids(dataset) -> List[str]:
     if hasattr(dataset, 'sample_ids'):
         return list(dataset.sample_ids)
     if hasattr(dataset, '_indexes'):
-        return [entry.split('.')[0] for entry, _, _ in dataset._indexes]
+        return [dataset.get_sample_id(i) for i in range(len(dataset))]
     return []
 
 
@@ -126,8 +140,31 @@ def _compute_property_stats(prop_map: Dict[str, List[float]], sample_ids: List[s
         raise ValueError('No property values found for training IDs.')
     tensor = torch.tensor(values, dtype=torch.float)
     mean = tensor.mean(dim=0)
-    std = tensor.std(dim=0).clamp_min(1e-6)
+    std = tensor.std(dim=0, unbiased=False).clamp_min(1e-6)
+    if not torch.isfinite(mean).all() or not torch.isfinite(std).all():
+        raise ValueError("Nonfinite property normalization statistics.")
     return mean, std
+
+
+def checked_property_backward(loss, model, optimizer):
+    optimizer.zero_grad(set_to_none=True)
+    if not torch.isfinite(loss).all():
+        raise RuntimeError('Nonfinite property loss; no optimizer update.')
+    loss.backward()
+    if any(p.grad is not None and not torch.isfinite(p.grad).all() for p in model.parameters()):
+        optimizer.zero_grad(set_to_none=True)
+        raise RuntimeError('Nonfinite property gradient; no optimizer update.')
+
+
+def property_error_sums(prediction, target):
+    error = prediction - target
+    return error.abs().sum(dim=0), error.square().sum(dim=0)
+
+
+def property_error_metrics(absolute_sum, squared_sum, count):
+    if count <= 0 or not torch.isfinite(absolute_sum).all() or not torch.isfinite(squared_sum).all():
+        raise ValueError('Empty or nonfinite property validation metrics.')
+    return (absolute_sum / count).tolist(), (squared_sum / count).sqrt().tolist()
 
 
 def _sanitize_key(key: str) -> str:
@@ -143,14 +180,59 @@ def _resolve_property_ckpt_path(base_path: str, key: str) -> str:
     return os.path.join(ckpt_dir, f'{ckpt_base}.{safe_key}.pt')
 
 
+def _load_predictor_checkpoint(path):
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f'Predictor checkpoint not found: {path}')
+    payload = torch.load(path, map_location='cpu', weights_only=True)
+    if not isinstance(payload, dict) or not isinstance(payload.get('state_dict'), dict):
+        raise ValueError('Predictor checkpoint requires a state_dict and target metadata.')
+    keys, cfg = payload.get('property_keys'), payload.get('model_cfg')
+    if (not isinstance(keys, list) or not keys
+            or not all(isinstance(key, str) and key.strip() for key in keys)
+            or len(keys) != len(set(keys)) or not isinstance(cfg, dict)
+            or cfg.get('n_properties') != len(keys)):
+        raise ValueError('Predictor checkpoint target names must match its output dimension.')
+    for name in ['property_mean', 'property_std']:
+        try:
+            value = torch.as_tensor(payload[name], dtype=torch.float)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f'Predictor checkpoint requires valid {name}.') from exc
+        if (value.shape != (len(keys),) or not torch.isfinite(value).all()
+                or (name == 'property_std' and not (value > 0).all())):
+            raise ValueError(f'Predictor checkpoint {name} must match targets and be finite; standard deviations must be positive.')
+    return payload
+
+
+def _load_separate_checkpoints(base_path, keys):
+    names = [_sanitize_key(key) for key in keys]
+    if len(names) != len(set(names)):
+        raise ValueError('Separate property targets must produce distinct checkpoint filenames.')
+    if not base_path:
+        return {}
+    paths = {key: _resolve_property_ckpt_path(base_path, key) for key in keys}
+    missing = [str(path) for path in paths.values() if not Path(path).is_file()]
+    if missing:
+        raise FileNotFoundError(f'Missing predictor checkpoints: {missing}')
+    payloads = {key: _load_predictor_checkpoint(path) for key, path in paths.items()}
+    for key, payload in payloads.items():
+        if payload['property_keys'] != [key]:
+            raise ValueError(f'Predictor checkpoint does not target {key}.')
+    return payloads
+
+
 def load_property_map(path: str, id_col: str, keys: List[str]) -> Dict[str, List[float]]:
     prop_map: Dict[str, List[float]] = {}
+    seen = set()
     with open(path, 'r') as f:
         reader = csv.DictReader(f)
         for row in reader:
             sample_id = row.get(id_col, '').strip()
             if not sample_id:
                 continue
+            if sample_id in seen:
+                raise ValueError(f'Duplicate property ID: {sample_id}')
+            seen.add(sample_id)
             values = []
             valid = True
             for k in keys:
@@ -163,7 +245,7 @@ def load_property_map(path: str, id_col: str, keys: List[str]) -> Dict[str, List
                 except ValueError:
                     valid = False
                     break
-                if val != val:  # NaN check
+                if not math.isfinite(val):
                     valid = False
                     break
                 values.append(val)
@@ -173,31 +255,31 @@ def load_property_map(path: str, id_col: str, keys: List[str]) -> Dict[str, List
     return prop_map
 
 
-def infer_property_keys(path: str, id_col: str) -> List[str]:
+def infer_property_keys(path: str, id_col: str, requested=None) -> List[str]:
     with open(path, 'r') as f:
         reader = csv.reader(f)
         header = next(reader)
-    keys = [k for k in header if k not in (id_col, 'sequence')]
+    keys = list(DEFAULT_PROPERTY_KEYS if requested is None else requested)
+    if not keys or len(set(keys)) != len(keys) or any(k in (id_col, 'sequence') for k in keys):
+        raise ValueError('Property targets must be unique, nonempty numeric target columns.')
+    if len(set(header)) != len(header):
+        raise ValueError('Duplicate column names in property CSV.')
+    missing = [k for k in [id_col, *keys] if k not in header]
+    if missing:
+        raise ValueError(f'Missing property columns: {missing}; use --property_keys for an explicit custom target set.')
     return keys
 
 
 def filter_cpcore_dataset(dataset: CPCoreDataset, keep_ids: set):
-    dataset.sample_ids = [sid for sid in dataset.sample_ids if sid in keep_ids]
-    dataset._lengths = []
-    for sample_id in dataset.sample_ids:
-        record = dataset.meta.get(sample_id, {})
-        pep_len = int(record.get('peptide_length', 0)) if record is not None else 0
-        pocket_len = 0
-        if dataset.pocket_json_dir is not None:
-            pocket_set = dataset._load_pocket_set(sample_id)
-            pocket_len = len(pocket_set) if pocket_set is not None else 0
-        dataset._lengths.append(pep_len + pocket_len)
+    indices = [i for i, sid in enumerate(dataset.sample_ids) if sid in keep_ids]
+    dataset.sample_ids = [dataset.sample_ids[i] for i in indices]
+    dataset._lengths = [dataset._lengths[i] for i in indices]
 
 
 def filter_mmap_dataset(dataset: CPCoreMMapDataset, keep_ids: set):
     new_indexes, new_props, new_lengths = [], [], []
     for idx, (entry, start, end) in enumerate(dataset._indexes):
-        sample_id = entry.split('.')[0]
+        sample_id = dataset.get_sample_id(idx)
         if sample_id in keep_ids:
             new_indexes.append((entry, start, end))
             new_props.append(dataset._properties[idx])
@@ -268,8 +350,59 @@ def build_property_predictor(
     return predictor, cfg
 
 
+def property_checkpoint_payload(predictor, cfg, keys, mean, std):
+    return {'state_dict': {k: v.detach().cpu().clone() for k, v in predictor.state_dict().items()},
+            'model_cfg': cfg, 'property_keys': list(keys),
+            'feature_signature': getattr(predictor, 'feature_signature', None),
+            'property_mean': torch.as_tensor(mean).tolist(), 'property_std': torch.as_tensor(std).tolist()}
+
+
+def finish_property_preflight(args, predictors, cfgs, keys, mean, std, inputs, before, batches):
+    from utils.training_preflight import verify_state_unchanged
+    root = Path(args.preflight_out)
+    inputs = {key: value.detach().cpu() if torch.is_tensor(value) else value for key, value in inputs.items()}
+    heads = []
+    for idx, (predictor, cfg, initial) in enumerate(zip(predictors, cfgs, before)):
+        verify_state_unchanged(initial, predictor)
+        selected = [keys[idx]] if args.separate_property_models else keys
+        m = mean[idx:idx + 1] if args.separate_property_models else mean
+        s = std[idx:idx + 1] if args.separate_property_models else std
+        payload = property_checkpoint_payload(predictor, cfg, selected, m, s)
+        payload['preflight_only'] = True
+        path = root / ((_sanitize_key(keys[idx]) if args.separate_property_models else 'multitask') + '.pt')
+        torch.save(payload, path)
+        loaded = torch.load(path, map_location='cpu', weights_only=True)
+        restored = PropertyPredictor(**loaded['model_cfg'])
+        restored.load_state_dict(loaded['state_dict'], strict=True)
+        verify_state_unchanged(initial, restored)
+        predictor.to('cpu').eval()
+        restored.eval()
+        with torch.no_grad():
+            expected, actual = predictor(**inputs), restored(**inputs)
+        if not torch.isfinite(actual).all() or not torch.allclose(expected, actual, rtol=1e-5, atol=1e-6):
+            raise RuntimeError('Reloaded property predictions differ.')
+        heads.append({'keys': selected, 'checkpoint': str(path), 'exact_state_reload': True,
+                      'prediction_max_abs_diff': float((expected - actual).abs().max()),
+                      'mean': loaded['property_mean'], 'std': loaded['property_std']})
+    report = {'optimizer_steps': 0, 'weights_unchanged': True, 'property_keys': keys,
+              'batches': batches, 'heads': heads,
+              'reload_output_comparison_device': 'cpu',
+              'guidance_compatibility_validated': False,
+              'feature_signature': args._feature_signature,
+              'effective_args': {k: v for k, v in vars(args).items() if not k.startswith('_')}}
+    (root / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
+    print(f'Property preflight passed: {len(batches)} batches, {len(heads)} head(s), zero optimizer updates.', flush=True)
+
+
 def main():
     args = parse()
+    if args.config is None:
+        raise ValueError('Please provide --config with APCyc LDM config')
+    config = yaml.safe_load(open(args.config, 'r'))
+    _apply_train_config(args, config.get('property_train', {}))
+    args.separate_property_models = _parse_bool(args.separate_property_models)
+    if args.validate_only and not args.predictor_ckpt:
+        raise ValueError('Use --predictor_ckpt for --validate_only.')
     setup_seed(args.seed)
     if args.gpus is not None and args.gpus >= 0 and torch.cuda.is_available():
         torch.cuda.set_device(args.gpus)
@@ -278,33 +411,28 @@ def main():
         device = torch.device('cpu')
 
     ckpt_payload = None
-    if args.predictor_ckpt and os.path.isfile(args.predictor_ckpt):
-        ckpt_payload = torch.load(args.predictor_ckpt, map_location='cpu')
+    if args.predictor_ckpt and not args.separate_property_models:
+        ckpt_payload = _load_predictor_checkpoint(args.predictor_ckpt)
 
-    keys = infer_property_keys(args.property_csv, args.id_col)
+    requested_keys = None
     if ckpt_payload and not args.property_keys:
         ckpt_keys = ckpt_payload.get('property_keys')
         if ckpt_keys:
-            keys = list(ckpt_keys)
+            requested_keys = list(ckpt_keys)
     if args.property_keys:
-        keys = [k.strip() for k in args.property_keys.split(',') if k.strip()]
+        requested_keys = [k.strip() for k in args.property_keys.split(',') if k.strip()]
+    keys = infer_property_keys(args.property_csv, args.id_col, requested_keys)
+    if ckpt_payload and ckpt_payload.get('property_keys') != keys:
+        raise ValueError('Predictor checkpoint target order differs from the requested property targets.')
+    separate_checkpoints = _load_separate_checkpoints(args.predictor_ckpt, keys) if args.separate_property_models else {}
+    if args.preflight_batches:
+        Path(args.preflight_out).mkdir(parents=True, exist_ok=False)
+        args.ckpt_out = str(Path(args.preflight_out) / 'preflight.pt')
     if len(keys) != args.k_properties:
         print_log(f'Override k_properties from {args.k_properties} to {len(keys)}')
         args.k_properties = len(keys)
     prop_map = load_property_map(args.property_csv, args.id_col, keys)
     print_log(f'Loaded properties: {len(prop_map)} entries, keys={keys}')
-
-    if args.config is not None:
-        config = yaml.safe_load(open(args.config, 'r'))
-        train_cfg = config.get('property_train', {})
-        if train_cfg:
-            _apply_train_config(args, train_cfg)
-        cyc_cfg = config.get('cyc_enhance', {})
-        if cyc_cfg:
-            set_config(cyc_cfg)
-            apply_enlarged_vocab(cyc_cfg)
-    else:
-        raise ValueError('Please provide --config with APCyc LDM config')
 
     if args.predictor_use_attn_pool is not None:
         args.predictor_use_attn_pool = _parse_bool(args.predictor_use_attn_pool)
@@ -314,11 +442,22 @@ def main():
         args.val_full_batch = _parse_bool(args.val_full_batch)
     args.use_dynamic_batch = _parse_bool(args.use_dynamic_batch)
     args.property_use_pair_injection = _parse_bool(args.property_use_pair_injection)
-    args.separate_property_models = _parse_bool(args.separate_property_models)
     args.strict_predictor_ckpt = _parse_bool(args.strict_predictor_ckpt)
     args.use_covariance_matrix = _parse_bool(args.use_covariance_matrix)
 
-    model = R.construct(config['model'])
+    from apcyc.checkpoint import load_bundle
+    from apcyc.property_features import feature_signature
+    if not args.generator_bundle:
+        raise ValueError('--generator_bundle is required: a randomly initialized frozen extractor is not reproducible.')
+    if not args.property_use_pair_injection:
+        raise ValueError('Property training must use the generator feature path; disabled pair injection is legacy-only.')
+    model, _ = load_bundle(args.generator_bundle, device)
+    if not 0 <= args.t_hard <= model.diffusion.num_steps:
+        raise ValueError('t_hard must be within the diffusion schedule.')
+    model.diffusion.resolve_topology_t_hard(args.t_hard)
+    args._feature_signature = feature_signature(model._bundle_sha256, args.t_hard)
+    if ckpt_payload and ckpt_payload.get('feature_signature') != args._feature_signature:
+        raise ValueError('Predictor checkpoint has a different or unknown frozen feature extractor.')
     model.to(device)
     model.eval()
     for p in model.parameters():
@@ -381,6 +520,9 @@ def main():
         filter_cpcore_dataset(train_set, keep_ids)
         filter_cpcore_dataset(valid_set, keep_ids)
     print_log(f'Filtered train: {len(train_set)}; valid: {len(valid_set)}')
+    for name, dataset in [('training', train_set), ('validation', valid_set)]:
+        if len(dataset) == 0:
+            raise ValueError(f'No complete property rows remain in the {name} dataset.')
 
     train_ids = _dataset_sample_ids(train_set)
     prop_mean, prop_std = _compute_property_stats(prop_map, train_ids)
@@ -434,15 +576,8 @@ def main():
         predictor_cfgs = []
         optimizers = []
         schedulers = []
-        ckpt_found = False
-        for key in keys:
-            ckpt = None
-            ckpt_path = None
-            if args.predictor_ckpt:
-                ckpt_path = _resolve_property_ckpt_path(args.predictor_ckpt, key)
-                if os.path.exists(ckpt_path):
-                    ckpt_found = True
-                    ckpt = torch.load(ckpt_path, map_location='cpu')
+        for idx, key in enumerate(keys):
+            ckpt = separate_checkpoints.get(key)
             if ckpt is not None and isinstance(ckpt, dict) and ckpt.get('model_cfg'):
                 cfg = ckpt['model_cfg']
                 pred = PropertyPredictor(**cfg)
@@ -457,6 +592,9 @@ def main():
                     use_attn_pool,
                     use_pair_stats,
                 )
+            pred.feature_signature = args._feature_signature
+            if ckpt is not None and ckpt.get('feature_signature') != args._feature_signature:
+                raise ValueError('Per-property checkpoint has a different frozen feature extractor.')
             pred.to(device)
             if ckpt is not None:
                 state_dict = ckpt.get('state_dict', ckpt)
@@ -469,11 +607,10 @@ def main():
                     if incompatible.unexpected_keys:
                         print_log(f'Predictor[{key}] unexpected {len(incompatible.unexpected_keys)} params.')
                 if isinstance(ckpt, dict) and 'property_mean' in ckpt and 'property_std' in ckpt:
-                    try:
-                        prop_mean[idx] = float(ckpt['property_mean'][0])
-                        prop_std[idx] = float(ckpt['property_std'][0])
-                    except Exception:
-                        pass
+                    prop_mean[idx] = float(ckpt['property_mean'][0])
+                    prop_std[idx] = float(ckpt['property_std'][0])
+                    if not torch.isfinite(prop_mean[idx]) or not torch.isfinite(prop_std[idx]) or prop_std[idx] <= 0:
+                        raise ValueError(f'Invalid normalization statistics for property {key}.')
             pred.train()
             predictors.append(pred)
             predictor_cfgs.append(cfg)
@@ -488,8 +625,6 @@ def main():
                 ))
             else:
                 schedulers.append(None)
-        if args.validate_only and args.predictor_ckpt and not ckpt_found:
-            raise FileNotFoundError('No predictor checkpoints found for separate_property_models.')
     else:
         predictor_cfg = None
         if ckpt_payload and isinstance(ckpt_payload, dict) and ckpt_payload.get('model_cfg'):
@@ -506,6 +641,7 @@ def main():
                 use_attn_pool,
                 use_pair_stats,
             )
+        predictor.feature_signature = args._feature_signature
         predictor.to(device)
         if ckpt_payload:
             state_dict = ckpt_payload.get('state_dict', ckpt_payload)
@@ -552,7 +688,7 @@ def main():
 
     def run_validation() -> Tuple[float, List[float]]:
         if valid_loader is None:
-            return float('inf'), []
+            raise ValueError('Property validation requires a validation loader.')
         if args.separate_property_models:
             for pred in predictors:
                 pred.eval()
@@ -606,79 +742,25 @@ def main():
                         X_0 = X
 
                 batch_ids = model.diffusion._get_batch_ids(mask, lengths)
-                t = torch.randint(0, model.diffusion.num_steps + 1, (int(batch_ids.max().item()) + 1,), device=device)
+                t = torch.randint(1, model.diffusion.num_steps + 1, (1,), device=device).expand(int(batch_ids.max().item()) + 1)
 
                 X_0_norm, centers = model.diffusion._normalize_position(X_0, batch_ids, mask, atom_mask, L)
                 X_t, _ = model.diffusion.trans_x.add_noise(X_0_norm, mask, batch_ids, t)
                 H_t, _ = model.diffusion.trans_h.add_noise(H_0, mask, batch_ids, t)
 
-                ctx_edges, inter_edges = model.diffusion._get_edges(mask, batch_ids, lengths)
-                edges = torch.cat([ctx_edges, inter_edges], dim=-1)
-
-                X_t_unorm = model.diffusion._unnormalize_position(X_t, centers, batch_ids, L)
-                if args.property_use_pair_injection:
-                    pair_out = model.diffusion._pair_forward(
-                        H_t, X_t_unorm, S_true, mask, batch_ids, position_ids, type_labels=None
-                    )
-                    p_c = torch.softmax(pair_out['type_logits'], dim=-1)
-                    lambda_cyc = cyclic_lambda(t, model.diffusion.num_steps, model.diffusion.lambda_cyc_max, model.diffusion.lambda_cyc_schedule)
-                    lambda_b = cyclic_lambda(t, model.diffusion.num_steps, model.diffusion.lambda_b_max, model.diffusion.lambda_cyc_schedule)
-                    lambda_g = cyclic_lambda(t, model.diffusion.num_steps, model.diffusion.lambda_g_max, model.diffusion.lambda_cyc_schedule)
-
-                    s_ij_inject = pair_out['s_ij_full'] + pair_out['s_ij_full'].transpose(0, 1)
-                    edge_type = model.diffusion._build_edge_type(mask, hard_pair=None)
-                    edge_type_ids = edge_type[edges[0], edges[1]]
-
-                    pair_edge_attr = model.diffusion.injector(
-                        edges,
-                        batch_ids,
-                        pair_out['pair_struct'],
-                        s_ij_inject,
-                        p_c,
-                        lambda_cyc,
-                        edge_type=edge_type_ids,
-                        hard_pair=None,
-                    )
-                    ctx_pair_attr = pair_edge_attr[: ctx_edges.shape[1]]
-                    inter_pair_attr = pair_edge_attr[ctx_edges.shape[1] :]
-
-                    edge_bias, edge_gate = model.diffusion.bias_gate_injector(
-                        edges,
-                        batch_ids,
-                        pair_out['pair_struct'],
-                        s_ij_inject,
-                        lambda_b,
-                        lambda_g,
-                    )
-
-                    if hasattr(model.diffusion, 'dist_rbf'):
-                        ctx_edge_attr = model.diffusion._get_edge_dist(X_t_unorm, ctx_edges, atom_mask)
-                        inter_edge_attr = model.diffusion._get_edge_dist(X_t_unorm, inter_edges, atom_mask)
-                        ctx_edge_attr = model.diffusion.dist_rbf(ctx_edge_attr).view(ctx_edges.shape[1], -1)
-                        inter_edge_attr = model.diffusion.dist_rbf(inter_edge_attr).view(inter_edges.shape[1], -1)
-                        ctx_edge_attr = torch.cat([ctx_edge_attr, ctx_pair_attr], dim=-1)
-                        inter_edge_attr = torch.cat([inter_edge_attr, inter_pair_attr], dim=-1)
-                    else:
-                        ctx_edge_attr, inter_edge_attr = ctx_pair_attr, inter_pair_attr
-                    edge_attr = torch.cat([ctx_edge_attr, inter_edge_attr], dim=0)
-                else:
-                    pair_out = None
-                    p_c = None
-                    edge_type_ids = None
-                    edge_bias, edge_gate = None, None
-                    if hasattr(model.diffusion, 'dist_rbf'):
-                        ctx_edge_attr = model.diffusion._get_edge_dist(X_t_unorm, ctx_edges, atom_mask)
-                        inter_edge_attr = model.diffusion._get_edge_dist(X_t_unorm, inter_edges, atom_mask)
-                        ctx_edge_attr = model.diffusion.dist_rbf(ctx_edge_attr).view(ctx_edges.shape[1], -1)
-                        inter_edge_attr = model.diffusion.dist_rbf(inter_edge_attr).view(inter_edges.shape[1], -1)
-                    else:
-                        ctx_edge_attr = torch.zeros(ctx_edges.shape[1], 0, device=X_t.device)
-                        inter_edge_attr = torch.zeros(inter_edges.shape[1], 0, device=X_t.device)
-                    ctx_pair_attr = torch.zeros(ctx_edges.shape[1], model.diffusion.pair_edge_dim, device=X_t.device)
-                    inter_pair_attr = torch.zeros(inter_edges.shape[1], model.diffusion.pair_edge_dim, device=X_t.device)
-                    ctx_edge_attr = torch.cat([ctx_edge_attr, ctx_pair_attr], dim=-1)
-                    inter_edge_attr = torch.cat([inter_edge_attr, inter_pair_attr], dim=-1)
-                    edge_attr = torch.cat([ctx_edge_attr, inter_edge_attr], dim=0)
+                from apcyc.property_features import property_features
+                with torch.no_grad():
+                    feature_S = S
+                    if model.diffusion.chemistry_profile == 'paper':
+                        feature_S = model.decode_residue_identities(H_t, model.diffusion._unnormalize_position(X_t, centers, batch_ids, L),
+                                                                    S, mask, position_ids, lengths, atom_mask)
+                    features = property_features(model.diffusion, H_t, X_t, feature_S, mask, lengths,
+                                                 atom_mask, position_ids, batch_ids, centers, L,
+                                                 t, args.t_hard, atom_embeddings)
+                ctx_edges, inter_edges = features['ctx_edges'], features['inter_edges']
+                edge_attr, edge_gate, edge_bias = features['edge_attr'], features['edge_gate'], features['edge_bias']
+                edge_type_ids, p_c = features['edge_type'], features['type_probs']
+                pair_out = dict(pair_struct=features['pair_struct'], pair_cyc=features['pair_cyc'], s_ij_full=features['s_ij'])
 
                 if args.separate_property_models:
                     for idx, pred in enumerate(predictors):
@@ -705,11 +787,13 @@ def main():
                         y_hat = y_hat.view(-1, 1)
                         y_k = y[:, idx:idx + 1]
                         y_raw_k = y_raw[:, idx:idx + 1]
-                        mae_sum[idx] += torch.abs(y_hat - y_k).mean()
-                        rmse_sum[idx] += torch.sqrt(torch.mean((y_hat - y_k) ** 2))
+                        absolute, squared = property_error_sums(y_hat, y_k)
+                        mae_sum[idx] += absolute.item()
+                        rmse_sum[idx] += squared.item()
                         y_hat_raw = y_hat * prop_std[idx].to(device) + prop_mean[idx].to(device)
-                        mae_raw_sum[idx] += torch.abs(y_hat_raw - y_raw_k).mean()
-                        rmse_raw_sum[idx] += torch.sqrt(torch.mean((y_hat_raw - y_raw_k) ** 2))
+                        absolute, squared = property_error_sums(y_hat_raw, y_raw_k)
+                        mae_raw_sum[idx] += absolute.item()
+                        rmse_raw_sum[idx] += squared.item()
                 else:
                     y_hat = predictor(
                         H_t,
@@ -731,37 +815,42 @@ def main():
                         batch_ids=batch_ids,
                         atom_embeddings=atom_embeddings,
                     )
-                    mae_sum += torch.abs(y_hat - y).mean(dim=0)
-                    rmse_sum += torch.sqrt(torch.mean((y_hat - y) ** 2, dim=0))
+                    absolute, squared = property_error_sums(y_hat, y)
+                    mae_sum += absolute
+                    rmse_sum += squared
                     y_hat_raw = y_hat * prop_std.to(device) + prop_mean.to(device)
-                    mae_raw_sum += torch.abs(y_hat_raw - y_raw).mean(dim=0)
-                    rmse_raw_sum += torch.sqrt(torch.mean((y_hat_raw - y_raw) ** 2, dim=0))
-                n_count += 1
+                    absolute, squared = property_error_sums(y_hat_raw, y_raw)
+                    mae_raw_sum += absolute
+                    rmse_raw_sum += squared
+                n_count += len(sample_ids)
             if n_count > 0:
-                mae = (mae_sum / n_count).tolist()
-                rmse = (rmse_sum / n_count).tolist()
-                mae_raw = (mae_raw_sum / n_count).tolist()
-                rmse_raw = (rmse_raw_sum / n_count).tolist()
+                mae, rmse = property_error_metrics(mae_sum, rmse_sum, n_count)
+                mae_raw, rmse_raw = property_error_metrics(mae_raw_sum, rmse_raw_sum, n_count)
                 log_line(f'Validation MAE: {mae}')
                 log_line(f'Validation RMSE: {rmse}')
                 log_line(f'Validation MAE (raw): {mae_raw}')
                 log_line(f'Validation RMSE (raw): {rmse_raw}')
                 return float(sum(mae) / max(len(mae), 1)), mae
-        return float('inf'), []
+        raise ValueError('Property validation produced no samples.')
 
     if args.validate_only:
-        if not args.predictor_ckpt:
-            raise ValueError('Use --predictor_ckpt for --validate_only.')
         log_line('Running validation only (no training).')
         metric, _ = run_validation()
         log_line(f'Validation-only mean MAE: {metric:.6f}')
         log_fh.close()
         return
 
-    if args.early_stop_patience >= 0:
+    if args.preflight_batches:
+        from utils.training_preflight import gradient_summary, verify_state_unchanged
+        checked_predictors = predictors if args.separate_property_models else [predictor]
+        checked_cfgs = predictor_cfgs if args.separate_property_models else [predictor_cfg]
+        preflight_before = [{k: v.detach().cpu().clone() for k, v in pred.state_dict().items()} for pred in checked_predictors]
+        extractor_before = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        preflight_checks = []
+    if args.early_stop_patience >= 0 and not args.preflight_batches:
         log_line('Running pre-train validation (no checkpoint).')
         _ = run_validation()
-    for epoch in range(args.epochs):
+    for epoch in range(1 if args.preflight_batches else args.epochs):
         if hasattr(train_set, 'update_epoch'):
             train_set.update_epoch()
         if args.separate_property_models:
@@ -773,7 +862,8 @@ def main():
         per_loss_sum = torch.zeros(args.k_properties, device=device)
         per_weighted_sum = torch.zeros(args.k_properties, device=device)
         n_batches = 0
-        for batch in tqdm(train_loader, desc=f'train epoch {epoch}', leave=False):
+        iterator = islice(train_loader, args.preflight_batches) if args.preflight_batches else train_loader
+        for batch in tqdm(iterator, desc='preflight' if args.preflight_batches else f'train epoch {epoch}', leave=False):
             sample_ids = batch['sample_id']
             y_raw = torch.tensor([prop_map[sid] for sid in sample_ids], device=device)
             y = (y_raw - prop_mean.to(device)) / prop_std.to(device)
@@ -818,80 +908,25 @@ def main():
                     X_0 = X
 
             batch_ids = model.diffusion._get_batch_ids(mask, lengths)
-            t = torch.randint(0, model.diffusion.num_steps + 1, (int(batch_ids.max().item()) + 1,), device=device)
+            t = torch.randint(1, model.diffusion.num_steps + 1, (1,), device=device).expand(int(batch_ids.max().item()) + 1)
 
             X_0_norm, centers = model.diffusion._normalize_position(X_0, batch_ids, mask, atom_mask, L)
             X_t, _ = model.diffusion.trans_x.add_noise(X_0_norm, mask, batch_ids, t)
             H_t, _ = model.diffusion.trans_h.add_noise(H_0, mask, batch_ids, t)
 
-            ctx_edges, inter_edges = model.diffusion._get_edges(mask, batch_ids, lengths)
-            edges = torch.cat([ctx_edges, inter_edges], dim=-1)
-
+            from apcyc.property_features import property_features
             with torch.no_grad():
-                X_t_unorm = model.diffusion._unnormalize_position(X_t, centers, batch_ids, L)
-                if args.property_use_pair_injection:
-                    pair_out = model.diffusion._pair_forward(
-                        H_t, X_t_unorm, S_true, mask, batch_ids, position_ids, type_labels=None
-                    )
-                    p_c = torch.softmax(pair_out['type_logits'], dim=-1)
-                    lambda_cyc = cyclic_lambda(t, model.diffusion.num_steps, model.diffusion.lambda_cyc_max, model.diffusion.lambda_cyc_schedule)
-                    lambda_b = cyclic_lambda(t, model.diffusion.num_steps, model.diffusion.lambda_b_max, model.diffusion.lambda_cyc_schedule)
-                    lambda_g = cyclic_lambda(t, model.diffusion.num_steps, model.diffusion.lambda_g_max, model.diffusion.lambda_cyc_schedule)
-
-                    s_ij_inject = pair_out['s_ij_full'] + pair_out['s_ij_full'].transpose(0, 1)
-                    edge_type = model.diffusion._build_edge_type(mask, hard_pair=None)
-                    edge_type_ids = edge_type[edges[0], edges[1]]
-
-                    pair_edge_attr = model.diffusion.injector(
-                        edges,
-                        batch_ids,
-                        pair_out['pair_struct'],
-                        s_ij_inject,
-                        p_c,
-                        lambda_cyc,
-                        edge_type=edge_type_ids,
-                        hard_pair=None,
-                    )
-                    ctx_pair_attr = pair_edge_attr[: ctx_edges.shape[1]]
-                    inter_pair_attr = pair_edge_attr[ctx_edges.shape[1] :]
-
-                    edge_bias, edge_gate = model.diffusion.bias_gate_injector(
-                        edges,
-                        batch_ids,
-                        pair_out['pair_struct'],
-                        s_ij_inject,
-                        lambda_b,
-                        lambda_g,
-                    )
-
-                    if hasattr(model.diffusion, 'dist_rbf'):
-                        ctx_edge_attr = model.diffusion._get_edge_dist(X_t_unorm, ctx_edges, atom_mask)
-                        inter_edge_attr = model.diffusion._get_edge_dist(X_t_unorm, inter_edges, atom_mask)
-                        ctx_edge_attr = model.diffusion.dist_rbf(ctx_edge_attr).view(ctx_edges.shape[1], -1)
-                        inter_edge_attr = model.diffusion.dist_rbf(inter_edge_attr).view(inter_edges.shape[1], -1)
-                        ctx_edge_attr = torch.cat([ctx_edge_attr, ctx_pair_attr], dim=-1)
-                        inter_edge_attr = torch.cat([inter_edge_attr, inter_pair_attr], dim=-1)
-                    else:
-                        ctx_edge_attr, inter_edge_attr = ctx_pair_attr, inter_pair_attr
-                    edge_attr = torch.cat([ctx_edge_attr, inter_edge_attr], dim=0)
-                else:
-                    pair_out = None
-                    p_c = None
-                    edge_type_ids = None
-                    edge_bias, edge_gate = None, None
-                    if hasattr(model.diffusion, 'dist_rbf'):
-                        ctx_edge_attr = model.diffusion._get_edge_dist(X_t_unorm, ctx_edges, atom_mask)
-                        inter_edge_attr = model.diffusion._get_edge_dist(X_t_unorm, inter_edges, atom_mask)
-                        ctx_edge_attr = model.diffusion.dist_rbf(ctx_edge_attr).view(ctx_edges.shape[1], -1)
-                        inter_edge_attr = model.diffusion.dist_rbf(inter_edge_attr).view(inter_edges.shape[1], -1)
-                    else:
-                        ctx_edge_attr = torch.zeros(ctx_edges.shape[1], 0, device=X_t.device)
-                        inter_edge_attr = torch.zeros(inter_edges.shape[1], 0, device=X_t.device)
-                    ctx_pair_attr = torch.zeros(ctx_edges.shape[1], model.diffusion.pair_edge_dim, device=X_t.device)
-                    inter_pair_attr = torch.zeros(inter_edges.shape[1], model.diffusion.pair_edge_dim, device=X_t.device)
-                    ctx_edge_attr = torch.cat([ctx_edge_attr, ctx_pair_attr], dim=-1)
-                    inter_edge_attr = torch.cat([inter_edge_attr, inter_pair_attr], dim=-1)
-                    edge_attr = torch.cat([ctx_edge_attr, inter_edge_attr], dim=0)
+                feature_S = S
+                if model.diffusion.chemistry_profile == 'paper':
+                    feature_S = model.decode_residue_identities(H_t, model.diffusion._unnormalize_position(X_t, centers, batch_ids, L),
+                                                                S, mask, position_ids, lengths, atom_mask)
+                features = property_features(model.diffusion, H_t, X_t, feature_S, mask, lengths,
+                                             atom_mask, position_ids, batch_ids, centers, L,
+                                             t, args.t_hard, atom_embeddings)
+            ctx_edges, inter_edges = features['ctx_edges'], features['inter_edges']
+            edge_attr, edge_gate, edge_bias = features['edge_attr'], features['edge_gate'], features['edge_bias']
+            edge_type_ids, p_c = features['edge_type'], features['type_probs']
+            pair_out = dict(pair_struct=features['pair_struct'], pair_cyc=features['pair_cyc'], s_ij_full=features['s_ij'])
 
             if args.separate_property_models:
                 for idx, pred in enumerate(predictors):
@@ -924,9 +959,9 @@ def main():
                         per_weighted_sum[idx] += loss_weighted.detach()
                     else:
                         loss_weighted = loss_k
-                    optimizers[idx].zero_grad(set_to_none=True)
-                    loss_weighted.backward()
-                    optimizers[idx].step()
+                    checked_property_backward(loss_weighted, pred, optimizers[idx])
+                    if not args.preflight_batches:
+                        optimizers[idx].step()
                     total_loss += float(loss_weighted.item())
             else:
                 y_hat = predictor(
@@ -951,20 +986,40 @@ def main():
                 )
 
                 loss_per = F.smooth_l1_loss(y_hat, y, reduction='none')
-                per_loss_sum += loss_per.mean(dim=0)
+                per_loss_sum += loss_per.detach().mean(dim=0)
                 if lambda_k is not None:
-                    per_weighted_sum += (loss_per * lambda_k[None, :]).mean(dim=0)
+                    per_weighted_sum += (loss_per.detach() * lambda_k[None, :]).mean(dim=0)
                 loss = loss_per
                 if lambda_k is not None:
                     loss = loss * lambda_k[None, :]
                 loss = loss.mean()
 
-                optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                optimizer.step()
+                checked_property_backward(loss, predictor, optimizer)
+                if not args.preflight_batches:
+                    optimizer.step()
 
                 total_loss += float(loss.item())
             n_batches += 1
+            if args.preflight_batches:
+                preflight_checks.append({'batch': n_batches, 'sample_ids': sample_ids,
+                                         'cumulative_loss': total_loss,
+                                         'gradients': [gradient_summary(pred) for pred in checked_predictors]})
+
+        if args.preflight_batches:
+            if n_batches != args.preflight_batches:
+                raise ValueError(f'Requested {args.preflight_batches} preflight batches, got {n_batches}.')
+            verify_state_unchanged(extractor_before, model)
+            inputs = dict(H_noisy=H_t, X_noisy=X_t, mask_generate=mask, atom_mask=atom_mask,
+                          position_ids=position_ids, ctx_edges=ctx_edges, inter_edges=inter_edges,
+                          edge_attr=edge_attr, edge_gate=edge_gate, edge_bias=edge_bias, edge_type=edge_type_ids,
+                          pair_struct=pair_out['pair_struct'] if pair_out is not None else None,
+                          pair_cyc=pair_out['pair_cyc'] if pair_out is not None else None, type_probs=p_c,
+                          s_ij=pair_out['s_ij_full'] if pair_out is not None else None, t=t,
+                          batch_ids=batch_ids, atom_embeddings=atom_embeddings)
+            finish_property_preflight(args, checked_predictors, checked_cfgs, keys, prop_mean, prop_std,
+                                      inputs, preflight_before, preflight_checks)
+            log_fh.close()
+            return
 
         denom = max(n_batches, 1)
         log_line(f'Epoch {epoch+1}/{args.epochs} train loss {total_loss / denom:.4f}')
@@ -1011,13 +1066,7 @@ def main():
                     continue
                 pred = predictors[idx]
                 cfg = predictor_cfgs[idx]
-                ckpt = {
-                    'state_dict': pred.state_dict(),
-                    'model_cfg': cfg,
-                    'property_keys': [key],
-                    'property_mean': [float(prop_mean[idx].item())],
-                    'property_std': [float(prop_std[idx].item())],
-                }
+                ckpt = property_checkpoint_payload(pred, cfg, [key], prop_mean[idx:idx + 1], prop_std[idx:idx + 1])
                 safe_val = f'{val_mae[idx]:.6f}'.replace('.', 'p')
                 safe_key = _sanitize_key(key)
                 ckpt_path = os.path.join(
@@ -1038,13 +1087,7 @@ def main():
                     for score, path in topk[key]:
                         f.write(f'{score:.6f}: {path}\n')
         else:
-            ckpt = {
-                'state_dict': predictor.state_dict(),
-                'model_cfg': predictor_cfg,
-                'property_keys': keys,
-                'property_mean': prop_mean.tolist(),
-                'property_std': prop_std.tolist(),
-            }
+            ckpt = property_checkpoint_payload(predictor, predictor_cfg, keys, prop_mean, prop_std)
             safe_val = f'{val_metric:.6f}'.replace('.', 'p')
             ckpt_path = os.path.join(ckpt_dir, f'{ckpt_base}_epoch{epoch+1}_val{safe_val}.pt')
             torch.save(ckpt, ckpt_path)

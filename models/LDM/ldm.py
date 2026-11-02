@@ -40,13 +40,13 @@ class LDMPepDesign(nn.Module):
         for param in self.autoencoder.parameters():
             param.requires_grad = False
         self.autoencoder.eval()
-        
+
         self.train_sequence, self.train_structure = True, True
         if mode == 'fixbb':
             self.train_structure = False
         elif mode == 'fixseq':
             self.train_sequence = False
-        
+
         latent_size = self.autoencoder.latent_size if self.train_sequence else hidden_size
 
         self.abs_position_encoding = nn.Embedding(max_gen_position, latent_size)
@@ -75,7 +75,7 @@ class LDMPepDesign(nn.Module):
     @oom_decorator
     def forward(self, X, S, mask, position_ids, lengths, atom_mask, L=None):
         '''
-            L: [bs, 3, 3], cholesky decomposition of the covariance matrix \Sigma = LL^T
+            L: [bs, 3, 3], cholesky decomposition of the covariance matrix Sigma = LL^T
         '''
 
         # encode latent_H_0 (N*d) and latent_X_0 (N*3)
@@ -96,7 +96,7 @@ class LDMPepDesign(nn.Module):
             H_0 = self.hidden2latent(H_0)
             H_0 = H_0.clone()
             H_0[mask] = H
-        
+
         if self.train_structure:
             X = X.clone()
             X[mask] = self.autoencoder._fill_latent_channels(Z)
@@ -192,7 +192,7 @@ class LDMPepDesign(nn.Module):
                 sample_opt['energy_func'] = self.latent_geometry_guidance
             # otherwise this should be a function
         autoencoder_n_iter = sample_opt.pop('autoencoder_n_iter', 1)
-        
+
         traj = self.diffusion.sample(H_0, X, position_embedding, mask, lengths, atom_embeddings, atom_mask, L, **sample_opt)
         X_0, H_0 = traj[0]
         X_0, H_0 = X_0[mask][:, :self.autoencoder.latent_n_channel], H_0[mask]

@@ -40,7 +40,7 @@ def _find_measure_unit(num_bytes):
 
 
 def create_mmap(iterator, out_dir, total_len=None, commit_batch=10000):
-    
+
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
@@ -71,13 +71,13 @@ def create_mmap(iterator, out_dir, total_len=None, commit_batch=10000):
             data_file.flush()  # save from memory to disk
             index_file.flush()
 
-        
+
     data_file.close()
     index_file.close()
 
 
 class MMAPDataset(torch.utils.data.Dataset):
-    
+
     def __init__(self, mmap_dir: str, specify_data: Optional[str]=None, specify_index: Optional[str]=None) -> None:
         super().__init__()
 
@@ -94,7 +94,7 @@ class MMAPDataset(torch.utils.data.Dataset):
         _data_path = os.path.join(mmap_dir, 'data.bin') if specify_data is None else specify_data
         self._data_file = open(_data_path, 'rb')
         self._mmap = mmap.mmap(self._data_file.fileno(), 0, access=mmap.ACCESS_READ)
-    
+
     def __del__(self):
         self._mmap.close()
         self._data_file.close()
@@ -105,7 +105,7 @@ class MMAPDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx: int):
         if idx < 0 or idx >= len(self):
             raise IndexError(idx)
-        
+
         _, start, end = self._indexes[idx]
         data = decompress(self._mmap[start:end])
 

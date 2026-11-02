@@ -7,6 +7,7 @@ import torch.nn as nn
 
 from data.format import VOCAB
 from .constants import CYCLE_TYPES, TYPE2IDX
+from .chemistry import is_iso_pair
 
 
 def _resolve_symbol(symbol: str) -> str:
@@ -62,16 +63,18 @@ def _valid_mask_ss(symbols: List[str], min_sep: int, device: torch.device) -> to
     return mask
 
 
-def _valid_mask_iso(symbols: List[str], device: torch.device) -> torch.Tensor:
+def _valid_mask_iso(symbols: List[str], device: torch.device, paper=False) -> torch.Tensor:
     L = len(symbols)
     mask = torch.zeros((L, L), device=device, dtype=torch.bool)
     if L < 2:
         return mask
     is_lys = [s == 'K' for s in symbols]
-    is_asp = [s == 'D' for s in symbols]
+    is_asp = [s in ('D', 'N') if paper else s == 'D' for s in symbols]
     for i in range(L):
         for j in range(i + 1, L):
-            if (is_lys[i] and is_asp[j]) or (is_asp[i] and is_lys[j]):
+            compatible = is_iso_pair(symbols[i], symbols[j]) if paper else (
+                (is_lys[i] and is_asp[j]) or (is_asp[i] and is_lys[j]))
+            if compatible:
                 mask[i, j] = True
     return mask
 
@@ -89,6 +92,7 @@ class CyclizationHeads(nn.Module):
         mask_mode: str = 'teacher',
         relax_residue_constraints: bool = True,
         eps: float = 1e-8,
+        chemistry_profile: str = 'legacy',
     ) -> None:
         super().__init__()
         self.min_sep_ss = min_sep_ss
@@ -98,6 +102,9 @@ class CyclizationHeads(nn.Module):
         self.mask_mode = mask_mode
         self.relax_residue_constraints = relax_residue_constraints
         self.eps = eps
+        if chemistry_profile not in {'legacy', 'paper'}:
+            raise ValueError('Unknown chemistry_profile')
+        self.chemistry_profile = chemistry_profile
 
         self.type_mlp = nn.Sequential(
             nn.Linear(d_cyc, type_hidden),
@@ -119,7 +126,7 @@ class CyclizationHeads(nn.Module):
                 mask = _upper_triangle_mask(len(symbols), device)
             return mask
         if CYCLE_TYPES[type_idx] == 'ISO':
-            mask = _valid_mask_iso(symbols, device)
+            mask = _valid_mask_iso(symbols, device, paper=self.chemistry_profile == 'paper')
             if self.relax_residue_constraints and not mask.any():
                 mask = _upper_triangle_mask(len(symbols), device)
             return mask
@@ -147,6 +154,15 @@ class CyclizationHeads(nn.Module):
         pooled = pair_cyc.mean(dim=(0, 1))
         if type_logits is None:
             type_logits = self.type_mlp(pooled)
+        if self.chemistry_profile == 'paper':
+            available = torch.tensor([bool(self._valid_mask_by_type(symbols, i, device).any())
+                                      for i in range(len(CYCLE_TYPES))], device=device)
+            if type_label is not None and not bool(available[type_label]):
+                raise ValueError('Ground-truth cyclization type has no chemically valid pair.')
+            if not available.any():
+                raise ValueError('No chemically valid cyclization topology for the decoded sequence.')
+            # Finite sentinel avoids 0 * infinity in downstream diagnostics.
+            type_logits = type_logits.masked_fill(~available, torch.finfo(type_logits.dtype).min)
         pair_logits = self.pair_mlp(pair_cyc).squeeze(-1)
 
         upper_mask = _upper_triangle_mask(L, device)
@@ -189,6 +205,8 @@ class CyclizationHeads(nn.Module):
             valid_mask = valid_mask * upper_mask.float()
             logits_masked = pair_logits + torch.log(valid_mask + self.eps)
 
+        if not torch.isfinite(logits_masked).any():
+            raise ValueError('No valid cyclization pair; refusing an all-masked softmax.')
         s_ij = torch.softmax(logits_masked.view(-1), dim=0).view(L, L)
         return type_logits, pair_logits, s_ij
 

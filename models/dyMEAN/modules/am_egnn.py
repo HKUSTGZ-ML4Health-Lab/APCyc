@@ -68,7 +68,7 @@ class AMEGNN(nn.Module):
             self.hidden_nf, self.hidden_nf, self.hidden_nf, n_channel, channel_nf,
             radial_nf, edges_in_d=in_edge_nf, act_fn=act_fn, residual=residual, n_rbf=n_rbf, cutoff=cutoff
         )
-    
+
     def forward(self, h, x, edges, channel_attr, channel_weights, ctx_edge_attr=None, x_update_mask=None, edge_bias=None, edge_gate=None):
         h = self.linear_in(h)
         h = self.dropout(h)
@@ -117,7 +117,7 @@ class RollerPooling(nn.Module):
                 mat = torch.triu(ones) - torch.triu(ones, diagonal=window_size)
                 pool_matrix.append(mat / window_size)
             self.pool_matrix = torch.stack(pool_matrix)
-    
+
     def forward(self, hidden, target_size):
         '''
         :param hidden: [n_edges, n_channel]
@@ -177,7 +177,7 @@ class AM_E_GCL(nn.Module):
             self.att_mlp = nn.Sequential(
                 nn.Linear(hidden_nf, 1),
                 nn.Sigmoid())
-            
+
         if n_rbf > 1:
             self.rbf_linear = RadialLinear(n_rbf, cutoff)
 
@@ -329,7 +329,7 @@ def coord2radial(edge_index, coord, attr, channel_weights, linear_map, rbf_linea
     :param num_seg: split row/col into segments to reduce memory cost
     '''
     row, col = edge_index
-    
+
     radials = []
 
     seg_size = (len(row) + NUM_SEG - 1) // NUM_SEG
@@ -346,12 +346,12 @@ def coord2radial(edge_index, coord, attr, channel_weights, linear_map, rbf_linea
             dim=-1, keepdim=False)  # [n_edge, n_channel, n_channel]
         if rbf_linear:
             coord_msg = rbf_linear(coord_msg)
-        
+
         coord_msg = coord_msg * torch.bmm(
             channel_weights[seg_row].unsqueeze(2),
             channel_weights[seg_col].unsqueeze(1)
             )  # [n_edge, n_channel, n_channel]
-        
+
         radial = torch.bmm(
             attr[seg_row].transpose(-1, -2),  # [n_edge, attr_size, n_channel]
             coord_msg)  # [n_edge, attr_size, n_channel]
@@ -364,7 +364,7 @@ def coord2radial(edge_index, coord, attr, channel_weights, linear_map, rbf_linea
             radial = linear_map(radial) / radial_norm  # [n_edge, d_out]
 
         radials.append(radial)
-    
+
     radials = torch.cat(radials, dim=0)  # [N_edge, d_out]
 
     # generate coord_diff by first mean src then minused by dst

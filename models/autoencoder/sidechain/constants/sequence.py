@@ -14,7 +14,7 @@
 
 """Constants used across protein representations.
 
-These constants standardize protein tokenization alphabets, ideal structure 
+These constants standardize protein tokenization alphabets, ideal structure
 geometries and topologies, etc.
 """
 from .geometry import AA_GEOMETRY

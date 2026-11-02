@@ -44,11 +44,13 @@ class SideChainModel(nn.Module):
                 chi.requires_grad = True
                 delta, lr, step, last_mse = 1e-4, 1, 0, 100
                 optimizer = torch.optim.Adam([chi], lr=lr)
-                while True:
+                while step < 200:
                     X, mask_X = self.sidechain_builder(ori_X[:, :, :4], C, S, chi)
                     mask_X = mask_X.squeeze(-1) # [bs, L, 14]
                     X, mask_X = X[:, :, 4:], mask_X[:, :, 4:].bool()
                     mse = F.mse_loss(X[mask_X], ori_X[:, :, 4:][mask_X]) # only on sidechain
+                    if not torch.isfinite(mse):
+                        raise ValueError("Non-finite sidechain fitting objective")
                     if torch.abs(mse - last_mse) < delta:
                         break
                     mse.backward()
@@ -60,7 +62,7 @@ class SideChainModel(nn.Module):
                     step += 1
                 chi = chi.detach()
                 # print(f'optimized {step} steps, mse {last_mse}')
-        
+
         X, _ = self.sidechain_builder(ori_X[:, :, :4], C, S, chi)
 
         # get back to our graph representations

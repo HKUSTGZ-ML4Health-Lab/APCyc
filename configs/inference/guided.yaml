@@ -1,0 +1,26 @@
+# Generator-feature guidance. Objective profiles: docs/INFERENCE.md.
+sample_opt:
+  pbar: false
+  energy_func: null
+  energy_lambda: 0.0
+  autoencoder_n_iter: 1
+  t_hard: 10
+  use_cg_guidance: true
+  property_ckpts:
+    affinity: /path/to/models/properties/affinity.pt
+    cycpep_proteolysis_sumscore: /path/to/models/properties/cycpep_proteolysis_sumscore.pt
+    Pproxy: /path/to/models/properties/Pproxy.pt
+    solubility_camsol_score: /path/to/models/properties/solubility_camsol_score.pt
+    Sfinal: /path/to/models/properties/Sfinal.pt
+  guidance_w_map:
+    affinity: 6
+    cycpep_proteolysis_sumscore: 4
+    Pproxy: 4
+    solubility_camsol_score: 3
+    Sfinal: 5
+  guidance_grad_norm_balance: true
+  guidance_grad_norm_eps: 1.0e-06
+  guidance_grad_norm_ref: mean
+  lambda_max: 0.3
+  t_guidance_start: 30
+  t_guidance_end: 5

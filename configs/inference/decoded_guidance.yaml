@@ -1,0 +1,19 @@
+sample_opt:
+  pbar: false
+  energy_func: null
+  energy_lambda: 0.0
+  autoencoder_n_iter: 1
+  t_hard: 10
+  use_cg_guidance: true
+  property_guidance_mode: decoded_structure
+  property_scorer: /path/to/models/frozen-property-scorer.pt
+  guidance_w_map:
+    affinity: 1.0
+    cycpep_proteolysis_sumscore: 0.0
+    Pproxy: 0.0
+    solubility_camsol_score: 0.0
+    Sfinal: 0.0
+  guidance_grad_norm_balance: true
+  lambda_max: 0.01
+  t_guidance_start: 10
+  t_guidance_end: 2

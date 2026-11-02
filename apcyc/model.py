@@ -1,6 +1,6 @@
 #!/usr/bin/python
 # -*- coding:utf-8 -*-
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
 import torch
 import torch.nn as nn
@@ -13,27 +13,16 @@ from data.format import VOCAB
 from models.autoencoder.model import AutoEncoder
 
 
-def _strip_prefix(state_dict, prefix):
-    return {k[len(prefix):]: v for k, v in state_dict.items() if k.startswith(prefix)}
-
-
 def _load_autoencoder(ckpt_path: str, strict: bool) -> AutoEncoder:
-    ckpt = torch.load(ckpt_path, map_location='cpu')
-    if isinstance(ckpt, AutoEncoder):
-        return ckpt
-    if isinstance(ckpt, dict):
-        state_dict = ckpt.get('state_dict', ckpt.get('model', ckpt))
-        if any(k.startswith('autoencoder.') for k in state_dict):
-            state_dict = _strip_prefix(state_dict, 'autoencoder.')
-        cfg = ckpt.get('model_cfg')
-        if cfg is None:
-            raise ValueError('Autoencoder checkpoint missing model_cfg for strict load.')
-        autoencoder = AutoEncoder(**cfg)
-        autoencoder.load_state_dict(state_dict, strict=strict)
-        return autoencoder
-    raise TypeError(f'Unsupported autoencoder checkpoint type: {type(ckpt)}')
+    if isinstance(ckpt_path, dict):
+        model = AutoEncoder(**ckpt_path)
+        model._checkpoint_model_cfg = dict(ckpt_path)
+        return model
+    from utils.checkpoint_utils import load_autoencoder_checkpoint
+    return load_autoencoder_checkpoint(ckpt_path, strict=strict)
+
 from apcyc.diffusion.apcyc_dpm import APCycFullDPM
-from apcyc.constants import CYCLE_TYPES, TYPE2IDX
+from apcyc.constants import CYCLE_TYPES
 
 
 @R.register('APCycLDMPepDesign')
@@ -62,17 +51,6 @@ class APCycLDMPepDesign(nn.Module):
         self.latent_idx = VOCAB.symbol_to_idx(VOCAB.LAT)
 
         self.autoencoder: AutoEncoder = _load_autoencoder(autoencoder_ckpt, autoencoder_strict_load)
-        # Backward-compat for older checkpoints without anchor-channel fields.
-        if not hasattr(self.autoencoder, 'enable_latent_anchor_channels'):
-            self.autoencoder.enable_latent_anchor_channels = False
-        if not hasattr(self.autoencoder, 'latent_anchor_atoms'):
-            self.autoencoder.latent_anchor_atoms = None
-        if not hasattr(self.autoencoder, 'latent_anchor_pad_atom'):
-            self.autoencoder.latent_anchor_pad_atom = 'CA'
-        if not hasattr(self.autoencoder, 'latent_anchor_strict'):
-            self.autoencoder.latent_anchor_strict = False
-        if not hasattr(self.autoencoder, 'anchor_channel_map'):
-            self.autoencoder.anchor_channel_map = None
         for param in self.autoencoder.parameters():
             param.requires_grad = False
         self.autoencoder.eval()
@@ -100,6 +78,7 @@ class APCycLDMPepDesign(nn.Module):
             **diffusion_opt,
             **pair_opt,
         )
+        # Runtime scorer caches are excluded from generator checkpoint tensors.
         self.property_predictor = None
         if self.train_sequence:
             self.hidden2latent = nn.Linear(hidden_size, self.autoencoder.latent_size)
@@ -215,10 +194,7 @@ class APCycLDMPepDesign(nn.Module):
         if self.train_structure:
             X = X.clone()
             S_pep = S_true[mask] if S_true is not None else None
-            try:
-                X[mask] = self.autoencoder._fill_latent_channels(Z, S_pep)
-            except TypeError:
-                X[mask] = self.autoencoder._fill_latent_channels(Z)
+            X[mask] = self.autoencoder._fill_latent_channels(Z, S_pep)
             atom_mask = atom_mask.clone()
             atom_mask_gen = atom_mask[mask]
             atom_mask_gen[:, : self.autoencoder.latent_n_channel] = 1
@@ -286,6 +262,20 @@ class APCycLDMPepDesign(nn.Module):
         )
 
     @torch.no_grad()
+    def decode_residue_identities(self, H, X, S, mask, position_ids, lengths, atom_mask):
+        """Decode residue identities for the chemical mask; never alter sequence outputs."""
+        if self.autoencoder.mode == 'fixseq':
+            return S.clone()
+        decode_mask = atom_mask.clone()
+        decode_mask[mask] = True
+        logits, _ = self.autoencoder.decode(
+            X, S, H[mask], X[mask, :self.autoencoder.latent_n_channel],
+            mask, position_ids, lengths, decode_mask, teacher_forcing=False, allow_unk=False)
+        decoded = S.clone()
+        decoded[mask] = self.autoencoder.s_remap[logits.argmax(dim=-1)]
+        return decoded
+
+    @torch.no_grad()
     def sample(
         self,
         X,
@@ -300,7 +290,7 @@ class APCycLDMPepDesign(nn.Module):
             'energy_func': None,
             'energy_lambda': 0.0,
             'autoencoder_n_iter': 1,
-            't_hard': 0,
+            't_hard': None,
             'return_pair_trajectory': False,
         },
         return_tensor=False,
@@ -335,9 +325,11 @@ class APCycLDMPepDesign(nn.Module):
 
         sample_opt = dict(sample_opt)
         autoencoder_n_iter = sample_opt.pop('autoencoder_n_iter', 1)
-        t_hard = sample_opt.pop('t_hard', 0)
+        t_hard = self.diffusion.resolve_topology_t_hard(sample_opt.pop('t_hard', None))
         return_pair_trajectory = sample_opt.pop('return_pair_trajectory', False)
         use_cg_guidance = sample_opt.pop('use_cg_guidance', False)
+        property_guidance_mode = sample_opt.pop('property_guidance_mode', 'generator_features')
+        property_scorer_path = sample_opt.pop('property_scorer', None)
         property_ckpt = sample_opt.pop('property_ckpt', None)
         property_ckpts = sample_opt.pop('property_ckpts', None)
         guidance_w = sample_opt.pop('guidance_w', None)
@@ -347,9 +339,15 @@ class APCycLDMPepDesign(nn.Module):
         lambda_max = sample_opt.pop('lambda_max', 0.0)
         t_guidance_start = sample_opt.pop('t_guidance_start', 0)
         t_guidance_end = sample_opt.pop('t_guidance_end', 0)
-        guidance_grad_norm_balance = sample_opt.pop('guidance_grad_norm_balance', False)
+        guidance_grad_norm_balance = sample_opt.pop('guidance_grad_norm_balance', self.diffusion.chemistry_profile == 'paper')
         guidance_grad_norm_eps = sample_opt.pop('guidance_grad_norm_eps', 1e-6)
         guidance_grad_norm_ref = sample_opt.pop('guidance_grad_norm_ref', 'mean')
+        if use_cg_guidance:
+            from apcyc.guidance import validate_guidance_options
+            validate_guidance_options(dict(lambda_max=lambda_max, t_guidance_start=t_guidance_start,
+                t_guidance_end=t_guidance_end, guidance_grad_norm_eps=guidance_grad_norm_eps,
+                guidance_grad_norm_ref=guidance_grad_norm_ref, guidance_w_min=guidance_w_min,
+                guidance_w_max=guidance_w_max), self.diffusion.num_steps)
 
         if 'energy_func' in sample_opt:
             if sample_opt['energy_func'] is None:
@@ -359,6 +357,24 @@ class APCycLDMPepDesign(nn.Module):
 
         if property_ckpts is None:
             property_ckpts = property_ckpt
+
+        if property_guidance_mode not in {'generator_features', 'decoded_structure'}:
+            raise ValueError('Unknown property_guidance_mode.')
+        if use_cg_guidance and property_guidance_mode == 'decoded_structure':
+            if not property_scorer_path or property_ckpts:
+                raise ValueError('Decoded guidance requires property_scorer and no property_ckpts.')
+            if not self.train_sequence or not self.train_structure or self.autoencoder.mode != 'codesign':
+                raise ValueError('Decoded property guidance requires a codesign generator.')
+            if L is None:
+                raise ValueError('Decoded property guidance requires receptor covariance factor L.')
+            from apcyc.property_scorer import load_scorer
+            from apcyc.checkpoint import sha256
+            tag = ('decoded_structure', str(property_scorer_path), sha256(property_scorer_path), str(X.device))
+            if self.property_predictor is None or getattr(self, '_property_predictor_tag', None) != tag:
+                object.__setattr__(self, 'property_predictor', load_scorer(property_scorer_path, X.device))
+                self._property_predictor_tag = tag
+        elif property_scorer_path:
+            raise ValueError('property_scorer requires decoded_structure guidance.')
 
         ckpt_keys = None
         ckpt_paths = None
@@ -376,25 +392,40 @@ class APCycLDMPepDesign(nn.Module):
             else:
                 raise TypeError(f'Unsupported property_ckpts type: {type(property_ckpts)}')
 
-        if use_cg_guidance and ckpt_paths is not None:
+        if use_cg_guidance and property_guidance_mode == 'generator_features' and ckpt_paths is not None:
             from apcyc.guidance import load_property_predictor, load_property_predictors
-            ckpt_tag = tuple(ckpt_paths)
+            from apcyc.checkpoint import sha256
+            ckpt_tag = (tuple(ckpt_paths), tuple(sha256(p) for p in ckpt_paths), tuple(ckpt_keys or []), str(X.device))
             if self.property_predictor is None or getattr(self, '_property_predictor_tag', None) != ckpt_tag:
                 if len(ckpt_paths) == 1:
-                    self.property_predictor = load_property_predictor(ckpt_paths[0], device=X.device)
+                    object.__setattr__(self, 'property_predictor', load_property_predictor(ckpt_paths[0], device=X.device))
+                    if ckpt_keys is not None and ckpt_keys != self.property_predictor.property_keys:
+                        raise ValueError('Configured property names differ from the checkpoint targets.')
                 else:
-                    self.property_predictor = load_property_predictors(ckpt_paths, device=X.device, keys=ckpt_keys)
+                    object.__setattr__(self, 'property_predictor', load_property_predictors(ckpt_paths, device=X.device, keys=ckpt_keys))
                 self._property_predictor_tag = ckpt_tag
+            from apcyc.guidance import validate_property_compatibility
+            validate_property_compatibility(self.property_predictor, self.diffusion, getattr(self, '_bundle_sha256', None), t_hard=t_hard)
 
         if guidance_w is None and guidance_w_map is not None and use_cg_guidance:
-            keys = getattr(self.property_predictor, 'property_keys', None)
-            if keys:
-                guidance_w = [guidance_w_map.get(k, 1.0) for k in keys]
-            else:
-                guidance_w = [guidance_w_map[k] for k in guidance_w_map]
+            from apcyc.guidance import weights_from_map
+            guidance_w = weights_from_map(self.property_predictor, guidance_w_map)
 
         if isinstance(guidance_w, str):
             guidance_w = [float(x) for x in guidance_w.split(',') if x.strip() != '']
+
+        residue_decoder = None
+        if self.diffusion.chemistry_profile == 'paper':
+            residue_decoder = lambda h, x: self.decode_residue_identities(
+                h, x, S, mask, position_ids, lengths, atom_mask)
+
+        property_score_fn = None
+        if use_cg_guidance and property_guidance_mode == 'decoded_structure':
+            from apcyc.property_scorer import decoded_scores
+            scoring_batch = dict(S=S, mask=mask, position_ids=position_ids, lengths=lengths,
+                                 atom_mask=atom_mask, L=L)
+            property_score_fn = lambda h, x, eh, ex, centers, t: decoded_scores(
+                self, self.property_predictor, h, x, eh, ex, scoring_batch, centers, t)
 
         traj, pair_state = self.diffusion.sample(
             H_0, X, position_embedding, mask, lengths, atom_embeddings, atom_mask, S,
@@ -405,6 +436,8 @@ class APCycLDMPepDesign(nn.Module):
             return_pair_trajectory=return_pair_trajectory,
             use_cg_guidance=use_cg_guidance,
             property_predictor=self.property_predictor,
+            property_score_fn=property_score_fn,
+            residue_decoder=residue_decoder,
             guidance_w=guidance_w,
             guidance_w_min=guidance_w_min,
             guidance_w_max=guidance_w_max,
@@ -416,15 +449,37 @@ class APCycLDMPepDesign(nn.Module):
             guidance_grad_norm_ref=guidance_grad_norm_ref,
             **sample_opt,
         )
-        X_0, H_0 = traj[0]
-        X_0, H_0 = X_0[mask][:, : self.autoencoder.latent_n_channel], H_0[mask]
+        final_X, final_H = traj[0]
+        X_0, H_0 = final_X[mask][:, : self.autoencoder.latent_n_channel], final_H[mask]
 
-        batch_X, batch_S, batch_ppls = self.autoencoder.test(
+        decoded_X, decoded_S, decoded_ppls = self.autoencoder.test(
             X, S, mask, position_ids, lengths, atom_mask,
-            given_laten_H=H_0, given_latent_X=X_0, return_tensor=return_tensor,
+            given_laten_H=H_0, given_latent_X=X_0, return_tensor=True,
             allow_unk=False, optimize_sidechain=optimize_sidechain,
             n_iter=autoencoder_n_iter
         )
+
+        batch_ids = self.diffusion._get_batch_ids(mask, lengths)
+        if self.diffusion.chemistry_profile == 'paper':
+            # Iterative AE refinement may change tokens after the last latent
+            # identity probe. The actual returned sequence defines feasibility.
+            final_S = S.clone()
+            final_S[mask] = decoded_S
+            final_pairs = self.diffusion._pair_forward(
+                final_H, final_X, final_S, mask, batch_ids, position_ids,
+                type_labels=None, atom_mask=atom_mask)
+            pair_state.update({key: final_pairs[key] for key in ['type_logits', 's_ij_full', 'pep_indices']})
+        if return_tensor:
+            batch_X, batch_S, batch_ppls = decoded_X, decoded_S, decoded_ppls
+        else:
+            peptide_batch_ids = batch_ids[mask]
+            batch_X, batch_S = [], []
+            for b in range(len(lengths)):
+                selected = peptide_batch_ids == b
+                batch_X.append(None if self.autoencoder.mode == 'fixbb' else decoded_X[selected].tolist())
+                batch_S.append(None if self.autoencoder.mode == 'fixseq' else
+                               [VOCAB.idx_to_symbol(int(s)) for s in decoded_S[selected]])
+            batch_ppls = decoded_ppls.tolist()
 
         if not return_pair:
             return batch_X, batch_S, batch_ppls
@@ -450,4 +505,5 @@ class APCycLDMPepDesign(nn.Module):
             'type_hat': type_hat,
             'pair_hat': pair_hat,
             'pair_traj': pair_state.get('pair_traj'),
+            'property_guidance': pair_state.get('property_guidance', []),
         }

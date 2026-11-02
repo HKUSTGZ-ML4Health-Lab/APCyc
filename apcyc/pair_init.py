@@ -13,6 +13,7 @@ def get_anchor_coords(
     mode: str = 'ca',
     ca_idx: int = 1,
     channel_idx: int = 0,
+    atom_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     X: [N, n_channel, 3] or [N, 3]
@@ -21,14 +22,25 @@ def get_anchor_coords(
     if X.dim() == 2:
         return X
     if mode == 'mean':
-        return X.mean(dim=1)
+        if atom_mask is None:
+            return X.mean(dim=1)
+        weights = atom_mask.to(X.dtype)
+        if not atom_mask.any(dim=1).all():
+            raise ValueError('Pair anchor requires a visible coordinate channel per residue.')
+        return (X * weights[..., None]).sum(dim=1) / weights.sum(dim=1, keepdim=True)
     if mode == 'channel':
         idx = channel_idx if channel_idx < X.size(1) else 0
+    else:
+        idx = ca_idx if ca_idx < X.size(1) else 0
+    if atom_mask is None:
         return X[:, idx]
-    if X.size(1) == 1:
-        return X[:, 0]
-    idx = ca_idx if ca_idx < X.size(1) else 0
-    return X[:, idx]
+    if atom_mask.shape != X.shape[:2] or not atom_mask.any(dim=1).all():
+        raise ValueError('Pair anchor requires a visible coordinate channel per residue.')
+    # A generated residue holds its geometric latent in the visible channel(s),
+    # not necessarily in the full-atom CA slot. Receptor CA remains preferred.
+    fallback = atom_mask.long().argmax(dim=1)
+    selected = torch.where(atom_mask[:, idx], idx, fallback)
+    return X[torch.arange(X.size(0), device=X.device), selected]
 
 
 class OnlinePairInit(nn.Module):
@@ -86,6 +98,7 @@ class OnlinePairInit(nn.Module):
         part_mask: torch.Tensor,
         batch_ids: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
+        atom_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns:
@@ -107,6 +120,7 @@ class OnlinePairInit(nn.Module):
             mode=self.anchor_mode,
             ca_idx=self.ca_idx,
             channel_idx=self.anchor_channel_idx,
+            atom_mask=atom_mask,
         )
         dist = torch.cdist(anchor, anchor, p=2)
 

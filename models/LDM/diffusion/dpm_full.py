@@ -36,7 +36,7 @@ class EpsilonNet(nn.Module):
             additional_pos_embed=True
         ):
         super().__init__()
-        
+
         atom_embed_size = hidden_size // 4
         edge_embed_size = hidden_size // 4
         pos_embed_size, seg_embed_size = input_size, input_size
@@ -48,8 +48,6 @@ class EpsilonNet(nn.Module):
             in_edge_nf=edge_embed_size + edge_size, n_layers=n_layers, residual=True,
             dropout=dropout, dense=False, n_rbf=n_rbf, cutoff=cutoff)
         self.hidden2input = nn.Linear(hidden_size, input_size)
-        # self.pos_embed2latent = nn.Linear(hidden_size, pos_embed_size)
-        # self.segment_embedding = nn.Embedding(2, seg_embed_size)
         self.edge_embedding = nn.Embedding(2, edge_embed_size)
 
     def forward(
@@ -69,12 +67,9 @@ class EpsilonNet(nn.Module):
             eps_X: (N, 14, 3)
         """
         t_embed = torch.stack([beta, torch.sin(beta), torch.cos(beta)], dim=-1)
-        # seg_embed = self.segment_embedding(mask_generate.long())
         if position_embedding is None:
-            # in_feat = torch.cat([H_noisy, t_embed, seg_embed], dim=-1) # [N, hidden_size * 2 + 3]
             in_feat = torch.cat([H_noisy, t_embed], dim=-1) # [N, hidden_size * 2 + 3]
         else:
-            # in_feat = torch.cat([H_noisy, t_embed, self.pos_embed2latent(position_embedding), seg_embed], dim=-1) # [N, hidden_size * 3 + 3]
             in_feat = torch.cat([H_noisy, t_embed, position_embedding], dim=-1) # [N, hidden_size * 3 + 3]
         edges = torch.cat([ctx_edges, inter_edges], dim=-1)
         edge_embed = torch.cat([
@@ -100,7 +95,7 @@ class EpsilonNet(nn.Module):
 
         # equivariant vector features changes
         eps_X = next_X - X_noisy
-        eps_X = torch.where(mask_generate[:, None, None].expand_as(eps_X), eps_X, torch.zeros_like(eps_X)) 
+        eps_X = torch.where(mask_generate[:, None, None].expand_as(eps_X), eps_X, torch.zeros_like(eps_X))
 
         # invariant scalar features changes
         next_H = self.hidden2input(next_H)
@@ -113,16 +108,16 @@ class EpsilonNet(nn.Module):
 class FullDPM(nn.Module):
 
     def __init__(
-        self, 
+        self,
         latent_size,
         hidden_size,
         n_channel,
-        num_steps, 
+        num_steps,
         n_layers=3,
         dropout=0.1,
         trans_pos_type='Diffusion',
         trans_seq_type='Diffusion',
-        trans_pos_opt={}, 
+        trans_pos_opt={},
         trans_seq_opt={},
         n_rbf=0,
         cutoff=1.0,
@@ -154,7 +149,6 @@ class FullDPM(nn.Module):
         else:
             with torch.no_grad():
                 L_inv = low_trianguler_inv(L)
-                # print(L_inv[0])
             X = X - centers
             X = torch.matmul(L_inv[batch_ids][..., None, :, :], X.unsqueeze(-1)).squeeze(-1)
         return X, centers
@@ -165,7 +159,7 @@ class FullDPM(nn.Module):
         else:
             X = torch.matmul(L[batch_ids][..., None, :, :], X_norm.unsqueeze(-1)).squeeze(-1) + centers
         return X
-    
+
     @torch.no_grad()
     def _get_batch_ids(self, mask_generate, lengths):
 
@@ -184,13 +178,13 @@ class FullDPM(nn.Module):
             input2=torch.arange(batch_ids.shape[0], device=batch_ids.device),
             size2=lengths,
         ) # (row, col)
-        
+
         is_ctx = mask_generate[row] == mask_generate[col]
         is_inter = ~is_ctx
         ctx_edges = torch.stack([row[is_ctx], col[is_ctx]], dim=0) # [2, Ec]
         inter_edges = torch.stack([row[is_inter], col[is_inter]], dim=0) # [2, Ei]
         return ctx_edges, inter_edges
-    
+
     @torch.no_grad()
     def _get_edge_dist(self, X, edges, atom_mask):
         '''
@@ -207,7 +201,6 @@ class FullDPM(nn.Module):
 
     def forward(self, H_0, X_0, position_embedding, mask_generate, lengths, atom_embeddings, atom_mask, L=None, t=None, sample_structure=True, sample_sequence=True):
         # if L is not None:
-        #     L = L / self.std
         batch_ids = self._get_batch_ids(mask_generate, lengths)
         batch_size = batch_ids.max() + 1
         if t == None:
@@ -266,14 +259,12 @@ class FullDPM(nn.Module):
         Args:
             H: contextual hidden states, (N, latent_size)
             X: contextual atomic coordinates, (N, 14, 3)
-            L: cholesky decomposition of the covariance matrix \Sigma=LL^T, (bs, 3, 3)
+            L: cholesky decomposition of the covariance matrix Sigma=LL^T, (bs, 3, 3)
             energy_func: guide diffusion towards lower energy landscape
         """
         # if L is not None:
-        #     L = L / self.std
         batch_ids = self._get_batch_ids(mask_generate, lengths)
         X, centers = self._normalize_position(X, batch_ids, mask_generate, atom_mask, L)
-        # print(X[0, 0])
 
         # Set the orientation and position of residues to be predicted to random values
         if sample_structure:
@@ -288,7 +279,6 @@ class FullDPM(nn.Module):
         else:
             H_init = H
 
-        # traj = {self.num_steps: (self._unnormalize_position(X_init, centers, batch_ids, L), H_init)}
         traj = {self.num_steps: (X_init, H_init)}
         if pbar:
             pbar = functools.partial(tqdm, total=self.num_steps, desc='Sampling')
@@ -296,11 +286,8 @@ class FullDPM(nn.Module):
             pbar = lambda x: x
         for t in pbar(range(self.num_steps, 0, -1)):
             X_t, H_t = traj[t]
-            # X_t, _ = self._normalize_position(X_t, batch_ids, mask_generate, atom_mask, L)
             X_t, H_t = torch.round(X_t, decimals=4), torch.round(H_t, decimals=4) # reduce numerical error
-            # print(t, 'input', X_t[0, 0] * 1000)
-            
-            # beta = self.trans_x.var_sched.betas[t].view(1).repeat(X_t.shape[0])
+
             beta = self.trans_x.get_timestamp(t).view(1).repeat(X_t.shape[0])
             t_tensor = torch.full([X_t.shape[0], ], fill_value=t, dtype=torch.long, device=X_t.device)
 
@@ -323,28 +310,21 @@ class FullDPM(nn.Module):
                         X=self._unnormalize_position(cur_X_state, centers.double(), batch_ids, L.double()),
                         mask_generate=mask_generate, batch_ids=batch_ids)
                     energy_eps_X = grad([energy], [cur_X_state], create_graph=False, retain_graph=False)[0].float()
-                # print(energy_lambda, energy / mask_generate.sum())
                 energy_eps_X[~mask_generate] = 0
                 energy_eps_X = -energy_eps_X
-                # print(t, 'energy', energy_eps_X[mask_generate][0, 0] * 1000)
             else:
                 energy_eps_X = None
 
-            # print(t, 'eps X', eps_X[mask_generate][0, 0] * 1000)
             H_next = self.trans_h.denoise(H_t, eps_H, mask_generate, batch_ids, t_tensor)
             X_next = self.trans_x.denoise(X_t, eps_X, mask_generate, batch_ids, t_tensor, guidance=energy_eps_X, guidance_weight=energy_lambda)
-            # print(t, 'output', X_next[mask_generate][0, 0] * 1000)
             # if t == 90:
-            #     aa
 
             if not sample_structure:
                 X_next = X_t
             if not sample_sequence:
                 H_next = H_t
 
-            # traj[t-1] = (self._unnormalize_position(X_next, centers, batch_ids, L), H_next)
             traj[t-1] = (X_next, H_next)
             traj[t] = (self._unnormalize_position(traj[t][0], centers, batch_ids, L).cpu(), traj[t][1].cpu())
-            # traj[t] = tuple(x.cpu() for x in traj[t])    # Move previous states to cpu memory.
         traj[0] = (self._unnormalize_position(traj[0][0], centers, batch_ids, L), traj[0][1])
         return traj

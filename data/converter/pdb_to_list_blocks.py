@@ -7,11 +7,11 @@ from Bio.PDB import PDBParser
 from data.format import Block, Atom
 
 
-def pdb_to_list_blocks(pdb: str, selected_chains: Optional[List[str]]=None, return_chain_ids: bool=False, dict_form: bool=False) -> Union[List[List[Block]], Dict[str, List[Block]]]:
+def pdb_to_list_blocks(pdb: str, selected_chains: Optional[List[str]]=None, return_chain_ids: bool=False, dict_form: bool=False, strict: bool=False) -> Union[List[List[Block]], Dict[str, List[Block]]]:
     '''
         Convert pdb file to a list of lists of blocks using Biopython.
         Each chain will be a list of blocks.
-        
+
         Parameters:
             pdb: Path to the pdb file
             selected_chains: List of selected chain ids. The returned list will be ordered
@@ -20,6 +20,7 @@ def pdb_to_list_blocks(pdb: str, selected_chains: Optional[List[str]]=None, retu
             return_chain_ids: Whether to return the ids of each chain
             dict_form: Whether to return chains in dict form (chain id as the key and blocks
                 as the value)
+            strict: Require one model and reject incomplete polymer backbones.
 
         Returns:
             A list of lists of blocks. Each chain in the pdb file will be parsed into
@@ -34,9 +35,11 @@ def pdb_to_list_blocks(pdb: str, selected_chains: Optional[List[str]]=None, retu
 
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure('anonym', pdb)
+    if strict and len(structure) != 1:
+        raise ValueError('Structure scoring requires exactly one PDB model.')
 
     list_blocks, chain_ids, chains = [], {}, []
-    
+
     for model in structure.get_models():  # use model 1 only
         structure = model
         break
@@ -61,14 +64,17 @@ def pdb_to_list_blocks(pdb: str, selected_chains: Optional[List[str]]=None, retu
                 continue
             if abrv == 'MSE':
                 abrv = 'MET'  # MET is usually transformed to MSE for structural analysis
-                
+
             # filter Hs because not all data include them
             atoms = [ Atom(atom.get_id(), atom.get_coord().tolist(), atom.element) for atom in residue if atom.element != 'H' ]
             block = Block(abrv, atoms, id=(res_number, insert_code))
+            if strict and not block.is_residue() and (not hetero_flag.strip() or
+                    all(name in residue for name in ['N', 'CA', 'C'])):
+                raise ValueError(f'Incomplete backbone in chain {_id}, residue {res_number}{insert_code.strip()}.')
             if block.is_residue():
                 residues.append(block)
                 res_ids[res_id] = True
-        
+
         if len(residues) == 0:  # not a chain
             continue
 
@@ -83,7 +89,7 @@ def pdb_to_list_blocks(pdb: str, selected_chains: Optional[List[str]]=None, retu
 
     if dict_form:
         return { chain: blocks for chain, blocks in zip(chains, list_blocks)}
-    
+
     if return_chain_ids:
         return list_blocks, chains
 

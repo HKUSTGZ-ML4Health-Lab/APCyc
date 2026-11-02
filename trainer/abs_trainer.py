@@ -13,6 +13,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from utils.oom_decorator import OOMReturn, safe_backward
 from utils.logger import print_log
+from utils.checkpoint_utils import save_model_checkpoint
 
 ########### Import your packages below ##########
 
@@ -31,6 +32,8 @@ class TrainConfig:
         self.patience = patience if patience > 0 else max_epoch#早停策略
         self.grad_clip = grad_clip #梯度裁剪阈值
         self.save_topk = save_topk #只保留性能最好的k个checkpoint
+        if type(grad_interval) is not int or grad_interval < 1:
+            raise ValueError("grad_interval must be a positive integer")
         self.grad_interval = grad_interval #多少步更新一次梯度
         self.val_freq = val_freq #验证频率
         self.__dict__.update(kwargs)
@@ -75,10 +78,13 @@ class Trainer:
         self.writer_buffer = {}
 
         # training process recording
+        self.optimizer_steps = 0
         self.global_step = 0
         self.valid_global_step = 0
         self.epoch = 0
         self.last_valid_metric = None
+        self.best_valid_metric = None
+        self.last_validation_position = None
         self.topk_ckpt_map = []  # smaller index means better ckpt
         self.patience = self.config.patience
 
@@ -111,7 +117,7 @@ class Trainer:
         return isinstance(value, OOMReturn)
 
     def _train_epoch(self, device):
-        if self.train_loader.sampler is not None and self.local_rank != -1:  # distributed
+        if hasattr(self.train_loader.sampler, 'set_epoch') and self.local_rank != -1:  # distributed
             self.train_loader.sampler.set_epoch(self.epoch)
         t_iter = tqdm(self.train_loader) if self._is_main_proc() else self.train_loader
         if hasattr(t_iter, 'set_description'):
@@ -120,33 +126,41 @@ class Trainer:
         val_every = getattr(self.config, 'val_every_n_steps', 0) or 0
         grad_norm_every = getattr(self.config, 'grad_norm_every_n_steps', 0) or 0
         throughput_every = getattr(self.config, 'throughput_every_n_steps', 0) or 0
-        for batch in t_iter:
+        self.optimizer.zero_grad(set_to_none=True)
+        pending_batches = 0
+        for batch_idx, batch in enumerate(t_iter):
             step_start = time.time()
             batch = self.to_device(batch, device)
             loss = self.train_step(batch, self.global_step)
-            if self.is_oom_return(loss):
-                print_log(f'Out of memory, local rank {self.local_rank}', level='WARN')
-                loss = loss.fake_loss
-            elif torch.isnan(loss):
-                print_log(f'Loss is nan, local_rank {self.local_rank}', level='WARN')
-                loss = sum([p.norm() for p in self.model.parameters() if p.dtype == torch.float]) * 0.0
-                self.log('Train/NaN', 1.0, self.global_step, val=False)
-            else:
-                self.log('Train/NaN', 0.0, self.global_step, val=False)
-            self.optimizer.zero_grad()
+            invalid = (self.is_oom_return(loss) or not torch.is_tensor(loss)
+                       or loss.numel() != 1 or not torch.isfinite(loss).all().item())
+            self._raise_if_any(invalid, 'Nonfinite loss or forward OOM; no optimizer update.', device)
             backward_ok = safe_backward(loss, self.model)
-            if not backward_ok:
-                print_log(f'Backward out of memory, skip', level='WARN')
-                loss = loss.detach() # manually delete the computing graph
-            if self.config.grad_clip is not None:
-                ori_grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
-                # recording gradients
-                self.log('Grad Norm', ori_grad_norm.cpu(), self.global_step)
-            elif grad_norm_every > 0 and (self.global_step + 1) % grad_norm_every == 0:
-                grad_norm = self._grad_norm()
-                if grad_norm is not None:
-                    self.log('Grad Norm', grad_norm, self.global_step)
-            self.optimizer.step()
+            self._raise_if_any(not backward_ok, 'Backward OOM; no optimizer update.', device)
+            pending_batches += 1
+            update = pending_batches == self.config.grad_interval or batch_idx + 1 == len(self.train_loader)
+            if update:
+                # Average microbatch objectives, including the final partial window.
+                for parameter in self.model.parameters():
+                    if parameter.grad is not None:
+                        parameter.grad.div_(pending_batches)
+                invalid_grad = any(p.grad is not None and not torch.isfinite(p.grad).all().item()
+                                   for p in self.model.parameters())
+                self._raise_if_any(invalid_grad, 'Nonfinite gradient; no optimizer update.', device)
+                if self.config.grad_clip is not None:
+                    norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
+                    self._raise_if_any(not torch.isfinite(norm).item(), 'Nonfinite gradient norm.', device)
+                    self.log('Grad Norm', norm.cpu(), self.global_step)
+                elif grad_norm_every > 0 and (self.global_step + 1) % grad_norm_every == 0:
+                    norm = self._grad_norm()
+                    if norm is not None:
+                        self.log('Grad Norm', norm, self.global_step)
+                self.optimizer.step()
+                self.optimizer_steps += 1
+                self.optimizer.zero_grad(set_to_none=True)
+                pending_batches = 0
+                if self.sched_freq == 'batch':
+                    self.scheduler.step()
             step_time = time.time() - step_start
             if throughput_every > 0 and (self.global_step + 1) % throughput_every == 0:
                 batch_size, token_count = self._batch_stats(batch)
@@ -174,66 +188,89 @@ class Trainer:
                 if self._is_main_proc():
                     print_log(f'validating step {self.global_step} ...')
                 self._valid_epoch(device)
-            if self.sched_freq == 'batch':
-                self.scheduler.step()
+                if self.patience <= 0:
+                    break
         if self.sched_freq == 'epoch':
             self.scheduler.step()
         self._train_epoch_end(device)
-    
+
     def _train_epoch_end(self, device):
         return
 
-    def _aggregate_val_metric(self, metric_arr):
-        return np.mean(metric_arr)
+    def _raise_if_any(self, invalid, message, device):
+        flag = torch.tensor(int(invalid), device=device)
+        if torch.distributed.is_initialized():
+            torch.distributed.all_reduce(flag, op=torch.distributed.ReduceOp.MAX)
+        if flag.item():
+            self.optimizer.zero_grad(set_to_none=True)
+            raise RuntimeError(message)
 
     def _valid_epoch_begin(self, device):
         return
 
     def _valid_epoch(self, device, save_ckpt: bool = True, update_state: bool = True):
-        metric_arr = []
+        total, count, invalid = 0.0, 0, False
+        was_training = self.model.training
         self.model.eval()
         self._valid_epoch_begin(device)
-        with torch.no_grad():
-            t_iter = tqdm(self.valid_loader) if self._is_main_proc() else self.valid_loader
-            if hasattr(t_iter, 'set_description'):
-                t_iter.set_description(f'valid epoch {self.epoch}')
-            for batch in t_iter:
-                batch = self.to_device(batch, device)
-                metric = self.valid_step(batch, self.valid_global_step)
-                metric_arr.append(metric.cpu().item())
-                self.valid_global_step += 1
-        
-        # judge
-        valid_metric = self._aggregate_val_metric(metric_arr)
-        if save_ckpt and self._is_main_proc():
-            save_path = os.path.join(self.model_dir, f'epoch{self.epoch}_step{self.global_step}.ckpt')
-            module_to_save = self.model.module if self.local_rank == 0 else self.model
-            torch.save(module_to_save, save_path)
-            self._maintain_topk_checkpoint(valid_metric, save_path)
-            print_log(f'Validation: {valid_metric}, save path: {save_path}')
-        if update_state:
-            if self._metric_better(valid_metric):
-                self.patience = self.config.patience
-            else:
-                self.patience -= 1
-            if self.sched_freq == 'val_epoch':
-                self.scheduler.step(valid_metric)
-            self.last_valid_metric = valid_metric
-        # write valid_metric
-        for name in self.writer_buffer:
-            value = np.mean(self.writer_buffer[name])
-            if self._is_main_proc():
-                print_log(f'{name}: {value}')
-            self.log(name, value, self.epoch)
-        self.writer_buffer = {}
-        self._valid_epoch_end(device)
-        self.model.train()
-    
+        try:
+            with torch.no_grad():
+                t_iter = tqdm(self.valid_loader) if self._is_main_proc() else self.valid_loader
+                if hasattr(t_iter, 'set_description'):
+                    t_iter.set_description(f'valid epoch {self.epoch}')
+                for batch in t_iter:
+                    batch = self.to_device(batch, device)
+                    metric = self.valid_step(batch, self.valid_global_step)
+                    bad = (self.is_oom_return(metric) or not torch.is_tensor(metric)
+                           or metric.numel() != 1 or not torch.isfinite(metric).all().item())
+                    invalid = invalid or bad
+                    if not bad:
+                        batch_size, _ = self._batch_stats(batch)
+                        weight = batch_size if batch_size is not None else 1
+                        total += metric.item() * weight
+                        count += weight
+                    self.valid_global_step += 1
+            # All ranks make scheduler, early-stop and checkpoint decisions from
+            # the same weighted mean, even with rank-specific validation noise.
+            self._raise_if_any(invalid, 'Nonfinite validation metric or OOM.', device)
+            totals = torch.tensor([total, count], dtype=torch.float64, device=device)
+            if torch.distributed.is_initialized():
+                torch.distributed.all_reduce(totals)
+            if totals[1].item() == 0:
+                raise ValueError('Validation loader is empty.')
+            valid_metric = (totals[0] / totals[1]).item()
+            if save_ckpt and self._is_main_proc():
+                save_path = os.path.join(self.model_dir, f'epoch{self.epoch}_step{self.global_step}.ckpt')
+                self.save_checkpoint(save_path)
+                self._maintain_topk_checkpoint(valid_metric, save_path)
+                print_log(f'Validation: {valid_metric}, save path: {save_path}')
+            if update_state:
+                if self._metric_better(valid_metric):
+                    self.best_valid_metric = valid_metric
+                    self.patience = self.config.patience
+                else:
+                    self.patience -= 1
+                if self.sched_freq == 'val_epoch':
+                    self.scheduler.step(valid_metric)
+                self.last_valid_metric = valid_metric
+                self.last_validation_position = (self.epoch, self.global_step)
+            self.log('Validation/selection_metric', valid_metric, self.epoch)
+            for name in self.writer_buffer:
+                value = np.mean(self.writer_buffer[name])
+                if self._is_main_proc():
+                    print_log(f'{name}: {value}')
+                self.log(name, value, self.epoch)
+            return valid_metric
+        finally:
+            self.writer_buffer = {}
+            self._valid_epoch_end(device)
+            self.model.train(was_training)
+
     def _valid_epoch_end(self, device):
         return
 
     def _metric_better(self, new):
-        old = self.last_valid_metric
+        old = self.best_valid_metric
         if old is None:
             return True
         if self.config.metric_min_better:
@@ -243,6 +280,9 @@ class Trainer:
 
     def _maintain_topk_checkpoint(self, valid_metric, ckpt_path):
         topk = self.config.save_topk
+        # A checkpoint path identifies one saved model, even after revalidation.
+        self.topk_ckpt_map = [(metric, path) for metric, path in self.topk_ckpt_map
+                              if path != ckpt_path]
         if self.config.metric_min_better:
             better = lambda a, b: a < b
         else:
@@ -302,7 +342,8 @@ class Trainer:
             if self._is_main_proc():
                 print_log(f'epoch {self.epoch + 1}/{self.config.max_epoch} starts')
             self._train_epoch(device)
-            if (self.epoch + 1) % self.config.val_freq == 0:
+            if ((self.epoch + 1) % self.config.val_freq == 0
+                    and self.last_validation_position != (self.epoch, self.global_step)):
                 if self._is_main_proc():
                     print_log(f'validating epoch {self.epoch + 1} ...')
                 self._valid_epoch(device)
@@ -334,9 +375,13 @@ class Trainer:
 
     def _save_step_checkpoint(self):
         save_path = os.path.join(self.model_dir, f'epoch{self.epoch}_step{self.global_step}.ckpt')
-        module_to_save = self.model.module if self.local_rank == 0 else self.model
-        torch.save(module_to_save, save_path)
+        self.save_checkpoint(save_path)
         print_log(f'Step checkpoint saved: {save_path}')
+
+    def save_checkpoint(self, path, preflight=False):
+        save_model_checkpoint(self.model, self.save_config, path,
+                              progress={'epoch': self.epoch, 'global_step': self.global_step,
+                                        'optimizer_steps': self.optimizer_steps, 'preflight_only': preflight})
 
     def log(self, name, value, step, val=False, batch_size=1):
         if self._is_main_proc():
@@ -354,7 +399,6 @@ class Trainer:
         opt_cfg = deepcopy(self.config.optimizer)
         #此时 cls 变量指向类对象 torch.optim.optimizer_type
         cls = getattr(torch.optim, opt_cfg.pop('class'))
-        # optimizer = cls(self.model.parameters(), **opt_cfg)
         #filter(func,interable):会把iterable里的元素一个个传给func，这里从模型的所有参数重需哪一个需要更新的参数
         #cls是优化器类，接受参数例子：torch.optim.Adam(params, lr=1e-3, weight_decay=1e-2)
         optimizer = cls(filter(lambda p: p.requires_grad, self.model.parameters()), **opt_cfg)

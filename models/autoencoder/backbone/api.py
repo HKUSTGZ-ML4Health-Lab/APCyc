@@ -28,6 +28,6 @@ class BackboneModel(nn.Module):
         R, t, q = self.backbone_builder.inverse(X, C)
         X_bb = self.backbone_builder(R, t, C) # [bs, L, 4, 3]
         X = torch.cat([X_bb, X[:, :, 4:]], dim=-2) # [bs, L, 14, 3]
-        
+
         # get back to our graph representations
         return  X[mask]
