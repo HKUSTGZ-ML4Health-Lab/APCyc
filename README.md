@@ -18,6 +18,10 @@ Receptor-conditioned cyclic-peptide generation with autoencoder and diffusion tr
 
 Explore the method and design examples on the [project page](https://hkustgz-ml4health-lab.github.io/APCyc/), or read the [paper](https://hkustgz-ml4health-lab.github.io/APCyc/assets/apcyc/paper.pdf). The project page is maintained in [`website/`](https://github.com/HKUSTGZ-ML4Health-Lab/APCyc/tree/main/website) and deployed with GitHub Pages.
 
+![Figure 2: APCyc sampling workflow](https://raw.githubusercontent.com/HKUSTGZ-ML4Health-Lab/APCyc/main/website/public/assets/apcyc/overview.png)
+
+**Figure 2.** Sampling workflow of APCyc for pocket-conditioned cyclic peptide design.
+
 ## Installation and guides
 
 The tested environment is Linux with Python 3.12 and PyTorch 2.5.1. Clone the repository, then follow [Installation](docs/INSTALL.md) to install matching CPU or CUDA wheels and the unified requirements.
