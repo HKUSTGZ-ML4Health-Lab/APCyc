@@ -2,6 +2,32 @@
 
 A generator bundle embeds its AE, architecture, vocabulary and geometry calibration. Supply it with `--bundle`; no separate AE file is needed for sampling. Tensor-only formats `apcyc.state_dict.v1` and `apcyc.training_state_dict.v1` load with strict tensor checks. `/path/to/...` values below are placeholders.
 
+## Download from Hugging Face
+
+From the repository root, install the download client and fetch a generator bundle:
+
+```bash
+python -m pip install huggingface_hub
+python - <<'PY'
+from huggingface_hub import hf_hub_download
+
+hf_hub_download(
+    repo_id="qiaoqian0214/APCyc",
+    filename="weights/apcyc-legacy-vocab.pt",
+    local_dir="outputs/models",
+)
+PY
+python scripts/make_example.py --out outputs/input
+python -m apcyc.sample \
+  --bundle outputs/models/weights/apcyc-legacy-vocab.pt \
+  --input outputs/input/manifest.jsonl \
+  --config configs/inference/default.yaml \
+  --out-dir outputs/sample --device cpu --seed 2021
+python scripts/inspect_predictions.py outputs/sample
+```
+
+Use new output directories when repeating the example. The input is a synthetic interface fixture; replace it with real receptor pockets for design experiments. Set `revision` in `hf_hub_download` to a Hub commit SHA to pin a model version. The optional download client does not replace the installation requirements in [Installation](INSTALL.md).
+
 ## Inputs and sampling
 
 Each input JSONL row specifies a receptor PDB, pocket and requested peptide length:
